@@ -2,6 +2,12 @@
   'use strict';
 
   const tauri = window.__TAURI__;
+  // The same page serves two web views: the sidebar ("ui") and the cover shown over the content area while a service's
+  // page isn't ready ("cover"). In a plain browser (previews) it shows both side by side.
+  const meta = (window.__TAURI_INTERNALS__ || {}).metadata || {};
+  const label = (meta.currentWebview || {}).label || '';
+  const mode = label === 'cover' ? 'cover' : label === 'ui' ? 'sidebar' : (new URLSearchParams(location.search).get('mode') || 'both');
+  document.documentElement.dataset.mode = mode;
   const sidebar = document.getElementById('sidebar');
   const content = document.getElementById('content');
   const invoke = (cmd, args) => tauri ? tauri.core.invoke(cmd, args || {}) : Promise.resolve(mockInvoke(cmd, args));

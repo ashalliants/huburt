@@ -5,7 +5,10 @@ use crate::{
     services::{self, SIGN_IN_HOSTS},
     types::Cookie,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 use tauri::{
     webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder},
     window::WindowBuilder,
@@ -56,12 +59,6 @@ pub fn show_window(hub: &Arc<Hub>, pick_urgent: bool) {
     let _ = win.set_focus();
     ensure_ui(hub, &win);
     hub.set_window_visible(true);
-    // The UI web view was just (re)created and sits above any service web views that survived: bring them back on top
-    for id in services::SERVICES.iter().map(|s| s.id) {
-        if let Some(wv) = hub.app.get_webview(&label(id)) {
-            let _ = wv.reparent(&win);
-        }
-    }
     layout(hub);
 }
 
@@ -71,9 +68,11 @@ pub fn hide_window(hub: &Arc<Hub>) {
     }
     native::set_dock_icon_visible(&hub.app, false);
     hub.set_window_visible(false);
-    // Free the sidebar's web view too: while hidden, only the pages that must stay alive use memory
-    if let Some(ui) = hub.app.get_webview("ui") {
-        let _ = ui.close();
+    // Free the sidebar's and the cover's web views too: while hidden, only the pages that must stay alive use memory
+    for local in ["ui", "cover"] {
+        if let Some(wv) = hub.app.get_webview(local) {
+            let _ = wv.close();
+        }
     }
 }
 
@@ -82,44 +81,63 @@ pub fn toggle_window(hub: &Arc<Hub>) {
     if visible && focused { hide_window(hub) } else { show_window(hub, true) }
 }
 
-fn ensure_ui(hub: &Arc<Hub>, win: &tauri::Window) {
-    if hub.app.get_webview("ui").is_some() {
+/// One of Hub's own pages (the sidebar, or the cover shown while a service isn't ready). Never overlaps a service's web
+/// view, so nothing depends on which web view is stacked above which.
+fn ensure_local(hub: &Arc<Hub>, win: &tauri::Window, label: &str) {
+    if hub.app.get_webview(label).is_some() {
         return;
     }
     let _ = win.add_child(
-        WebviewBuilder::new("ui", WebviewUrl::App("index.html".into())),
+        WebviewBuilder::new(label, WebviewUrl::App("index.html".into())),
         LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(1100.0, 760.0),
+        LogicalSize::new(SIDEBAR_W, 700.0),
     );
 }
 
-/// Puts every web view where it belongs: the UI fills the window; the selected service sits over the content area once
-/// its page has drawn (until then it renders off-screen so the "waking up" cover shows); other services are hidden.
+fn ensure_ui(hub: &Arc<Hub>, win: &tauri::Window) { ensure_local(hub, win, "ui"); }
+
+static LAYOUT: Mutex<()> = Mutex::new(());
+
+/// Puts every web view where it belongs. The sidebar takes the left strip. In the content area exactly one thing is
+/// shown: the selected service's page once it has drawn (until then it renders off-screen, so it isn't throttled and
+/// lays out properly), or otherwise the cover ("waking up", "can't reach", "turned off"). Other services are hidden.
 pub fn layout(hub: &Arc<Hub>) {
+    let _guard = LAYOUT.lock().unwrap_or_else(|e| e.into_inner());   // layouts are requested from several threads
     let Some(win) = hub.app.get_window("main") else { return };
     let Ok(size) = win.inner_size() else { return };
     let scale = win.scale_factor().unwrap_or(1.0);
     let (w, h) = (size.width as f64 / scale, size.height as f64 / scale);
     let (window_visible, selected, states) = {
         let c = hub.core.lock().unwrap();
-        let st: Vec<(&'static str, bool, bool)> = c.svcs.values().map(|s| (s.def.id, s.ready, s.error.is_some() || !s.enabled)).collect();
+        let st: Vec<(&'static str, bool, bool, bool)> = c.svcs.values().map(|s| (s.def.id, s.enabled, s.ready, s.error.is_some())).collect();
         (c.window_visible, c.selected.clone(), st)
     };
     if let Some(ui) = hub.app.get_webview("ui") {
         let _ = ui.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = ui.set_size(LogicalSize::new(w, h));
+        let _ = ui.set_size(LogicalSize::new(SIDEBAR_W, h));
     }
     let content = LogicalSize::new((w - SIDEBAR_W).max(1.0), h);
-    for (id, ready, covered) in states {
+    let mut page_showing = false;
+    for (id, enabled, ready, errored) in states {
         let Some(wv) = hub.app.get_webview(&label(id)) else { continue };
-        if !window_visible || selected != id || covered {
-            let _ = wv.hide();
-        } else {
-            let x = if ready { SIDEBAR_W } else { OFFSCREEN_X };
-            let _ = wv.set_position(LogicalPosition::new(x, 0.0));
+        if window_visible && selected == id && enabled && !errored {
+            let _ = wv.set_position(LogicalPosition::new(if ready { SIDEBAR_W } else { OFFSCREEN_X }, 0.0));
             let _ = wv.set_size(content);
             let _ = wv.show();
+            page_showing = ready;
+        } else {
+            let _ = wv.hide();
         }
+    }
+    if window_visible && !page_showing {
+        ensure_local(hub, &win, "cover");
+        if let Some(cover) = hub.app.get_webview("cover") {
+            let _ = cover.set_position(LogicalPosition::new(SIDEBAR_W, 0.0));
+            let _ = cover.set_size(content);
+            let _ = cover.show();
+        }
+    } else if let Some(cover) = hub.app.get_webview("cover") {
+        let _ = cover.close();
     }
 }
 
