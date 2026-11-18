@@ -7,5 +7,5 @@
   "remote": {
     "urls": ["https://*.slack.com/*", "https://slack.com/*", "https://*.whatsapp.com/*", "https://*.google.com/*", "https://google.com/*"]
   },
-  "permissions": ["allow-page-notify", "allow-page-probe", "allow-open-external"]
+  "permissions": ["allow-page-notify", "allow-page-probe", "allow-open-external", "allow-shortcut"]
 }

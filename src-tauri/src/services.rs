@@ -2,8 +2,11 @@
 use regex::Regex;
 
 /// Slack blocks Safari/WebKit's own identity with "Please update your browser"; it accepts Chrome's.
+/// (macOS only: on Windows the web view is Edge-based, and its own identity is already accepted by both sites.)
+#[cfg(target_os = "macos")]
 pub const CHROME_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
 /// WhatsApp Web refuses browsers it doesn't recognise; present as Safari.
+#[cfg(target_os = "macos")]
 pub const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
 
 /// Hosts that always stay inside Hub (single sign-on providers), on top of each service's own hosts.
@@ -11,6 +14,15 @@ pub const SIGN_IN_HOSTS: &[&str] = &[
     "google.com", "gstatic.com", "microsoft.com", "microsoftonline.com", "live.com", "okta.com", "oktapreview.com",
     "apple.com", "github.com", "auth0.com", "onelogin.com", "duosecurity.com", "slack.com", "slack-edge.com",
 ];
+
+#[cfg(target_os = "macos")]
+const SLACK_UA: Option<&str> = Some(CHROME_UA);
+#[cfg(not(target_os = "macos"))]
+const SLACK_UA: Option<&str> = None;
+#[cfg(target_os = "macos")]
+const WHATSAPP_UA: Option<&str> = Some(SAFARI_UA);
+#[cfg(not(target_os = "macos"))]
+const WHATSAPP_UA: Option<&str> = None;
 
 pub struct SleepCycle {
     pub interval: u64,
@@ -98,7 +110,7 @@ pub static SERVICES: &[Service] = &[
         id: "slack", name: "Slack", icon: "slack",
         url: "https://app.slack.com/client",
         hosts: &["slack.com", "slack-edge.com"],
-        store: store(2), user_agent: Some(CHROME_UA),
+        store: store(2), user_agent: SLACK_UA,
         lazy: true, has_poller: true, poll_while_loaded: true, poll_interval: 30,
         unread_wording: "DMs/mentions",
         sleep_cycle: None, wake_ready_js: None, logged_out_js: None,
@@ -128,7 +140,7 @@ pub static SERVICES: &[Service] = &[
         id: "whatsapp", name: "WhatsApp", icon: "whatsapp",
         url: "https://web.whatsapp.com",
         hosts: &["whatsapp.com", "whatsapp.net"],
-        store: store(3), user_agent: Some(SAFARI_UA),
+        store: store(3), user_agent: WHATSAPP_UA,
         lazy: true, has_poller: false, poll_while_loaded: false, poll_interval: 60,
         unread_wording: "unread chats",
         sleep_cycle: Some(SleepCycle { interval: 300, awake_for: 45 }),
@@ -193,6 +205,22 @@ pub fn notification_shim_js(service_id: &str) -> String {
     )
 }
 
+/// Ctrl+1..9 (switch service), Ctrl+R (reload), Ctrl+W / Ctrl+H (hide to the tray). Injected into service pages where
+/// there is no app menu to own these shortcuts (Windows).
+#[cfg(any(not(target_os = "macos"), test))]
+pub fn shortcuts_js() -> &'static str {
+    r#"(function () {
+  function send(kind, n) { try { window.__TAURI_INTERNALS__.invoke('shortcut', { kind: kind, n: n || null }); } catch (_) {} }
+  window.addEventListener('keydown', function (e) {
+    if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    var k = e.key.toLowerCase();
+    if (/^[1-9]$/.test(k)) { e.preventDefault(); e.stopPropagation(); send('select', Number(k)); }
+    else if (k === 'r') { e.preventDefault(); e.stopPropagation(); send('reload'); }
+    else if (k === 'w' || k === 'h') { e.preventDefault(); e.stopPropagation(); send('hide'); }
+  }, true);
+})();"#
+}
+
 /// Evaluates `expr` in the page and reports the result back to Hub (`kind` says what the answer is for).
 pub fn probe_js(service_id: &str, kind: &str, expr: &str) -> String {
     // The expression goes inside parentheses, so a trailing ";" (as in the Slack token script) would be a syntax error
@@ -237,6 +265,15 @@ mod tests {
         assert!(gmail.stays_in_app("accounts.google.com", Some(("accounts.google.com", "/"))));
         let wa = service("whatsapp").unwrap();
         assert!(!wa.stays_in_app("github.com", Some(("web.whatsapp.com", "/"))));
+    }
+
+    #[test]
+    fn shortcut_script_reports_the_expected_kinds() {
+        let js = shortcuts_js();
+        for kind in ["'select'", "'reload'", "'hide'"] {
+            assert!(js.contains(kind), "{kind}");
+        }
+        assert!(js.contains("e.ctrlKey") && js.contains("invoke('shortcut'"));
     }
 
     #[test]

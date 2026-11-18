@@ -37,10 +37,7 @@ impl Default for Settings {
 
 impl Settings {
     pub fn path() -> PathBuf {
-        let base = std::env::var("HUB_SETTINGS_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Application Support/Huburt")
-        });
-        base.join("settings.json")
+        crate::native::settings_dir().join("settings.json")
     }
 
     pub fn load() -> Settings {

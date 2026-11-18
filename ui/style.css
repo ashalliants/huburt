@@ -175,6 +175,10 @@ body {
 .tile .icon .power svg, .tile .icon .muted-mark svg { width: 10px; height: 10px; display: block; }
 .muted-mark { left: -8px; right: auto; top: 3px; }
 
+/* One page, two web views: the sidebar and the cover over the content area (see app.js) */
+[data-mode="sidebar"] #content { display: none; }
+[data-mode="cover"] #sidebar { display: none; }
+
 /* Content cover */
 #content {
   flex: 1;

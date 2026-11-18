@@ -1,0 +1,29 @@
+name: Release
+
+# Push a tag like v0.1.0 to build the Windows installers and attach them to a GitHub release.
+# (The macOS app is built locally with ./build.sh, signed with a local certificate.)
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build installers
+        run: npx --yes @tauri-apps/cli@2 build --bundles nsis,msi
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --title "Huburt $GITHUB_REF_NAME" --generate-notes \
+            src-tauri/target/release/bundle/nsis/*.exe src-tauri/target/release/bundle/msi/*.msi

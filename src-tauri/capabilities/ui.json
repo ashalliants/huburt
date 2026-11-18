@@ -3,6 +3,6 @@
   "identifier": "ui",
   "description": "Hub's own sidebar page",
   "windows": ["main"],
-  "webviews": ["ui"],
-  "permissions": ["core:default", "allow-get-state", "allow-select", "allow-reorder", "allow-show-menu", "allow-reload", "allow-set-enabled"]
+  "webviews": ["ui", "cover"],
+  "permissions": ["core:default", "allow-get-state", "allow-select", "allow-reorder", "allow-show-menu", "allow-reload", "allow-set-enabled", "allow-shortcut"]
 }
