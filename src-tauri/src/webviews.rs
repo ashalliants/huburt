@@ -193,6 +193,10 @@ pub fn create_service(hub: &Arc<Hub>, id: &'static str) {
     }
     b = b.initialization_script_for_all_frames(services::notification_shim_js(id));
     b = b.initialization_script(link_guard_js(def));
+    #[cfg(not(target_os = "macos"))]
+    {
+        b = b.initialization_script(services::shortcuts_js());
+    }
     if def.darken_with_filter {
         b = b.initialization_script(services::dark_filter_js(def.native_dark_class));
     }

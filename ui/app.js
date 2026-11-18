@@ -212,15 +212,23 @@
   // Swallow the native/web context menu everywhere (the native one is built in Rust)
   document.addEventListener('contextmenu', (e) => e.preventDefault());
 
-  // ---- Keyboard (only for browser previews: inside Huburt the native menu owns these shortcuts) ----
+  // ---- Keyboard ----
+  // macOS: the native app menu owns these shortcuts. Windows (and browser previews): Ctrl+1..9 switch service, Ctrl+R
+  // reloads the selected one, Ctrl+W / Ctrl+H hide the window to the tray.
+  const isMac = /Mac/i.test(navigator.platform);
   document.addEventListener('keydown', (e) => {
-    if (tauri || !state || !e.metaKey || e.ctrlKey || e.altKey) return;
-    if (/^[1-9]$/.test(e.key)) {
-      const id = state.order[Number(e.key) - 1];
+    if ((tauri && isMac) || !state || e.altKey || e.shiftKey) return;
+    if (isMac ? (!e.metaKey || e.ctrlKey) : (!e.ctrlKey || e.metaKey)) return;
+    const k = e.key.toLowerCase();
+    if (/^[1-9]$/.test(k)) {
+      const id = state.order[Number(k) - 1];
       if (id) { e.preventDefault(); invoke('select', { id }); }
-    } else if (e.key === 'r' || e.key === 'R') {
+    } else if (k === 'r') {
       e.preventDefault();
       if (state.selected) invoke('reload', { id: state.selected });
+    } else if (k === 'w' || k === 'h') {
+      e.preventDefault();
+      invoke('shortcut', { kind: 'hide' });
     }
   });
 

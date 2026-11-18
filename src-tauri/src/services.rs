@@ -205,6 +205,22 @@ pub fn notification_shim_js(service_id: &str) -> String {
     )
 }
 
+/// Ctrl+1..9 (switch service), Ctrl+R (reload), Ctrl+W / Ctrl+H (hide to the tray). Injected into service pages where
+/// there is no app menu to own these shortcuts (Windows).
+#[cfg(any(not(target_os = "macos"), test))]
+pub fn shortcuts_js() -> &'static str {
+    r#"(function () {
+  function send(kind, n) { try { window.__TAURI_INTERNALS__.invoke('shortcut', { kind: kind, n: n || null }); } catch (_) {} }
+  window.addEventListener('keydown', function (e) {
+    if (!e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    var k = e.key.toLowerCase();
+    if (/^[1-9]$/.test(k)) { e.preventDefault(); e.stopPropagation(); send('select', Number(k)); }
+    else if (k === 'r') { e.preventDefault(); e.stopPropagation(); send('reload'); }
+    else if (k === 'w' || k === 'h') { e.preventDefault(); e.stopPropagation(); send('hide'); }
+  }, true);
+})();"#
+}
+
 /// Evaluates `expr` in the page and reports the result back to Hub (`kind` says what the answer is for).
 pub fn probe_js(service_id: &str, kind: &str, expr: &str) -> String {
     // The expression goes inside parentheses, so a trailing ";" (as in the Slack token script) would be a syntax error
@@ -249,6 +265,15 @@ mod tests {
         assert!(gmail.stays_in_app("accounts.google.com", Some(("accounts.google.com", "/"))));
         let wa = service("whatsapp").unwrap();
         assert!(!wa.stays_in_app("github.com", Some(("web.whatsapp.com", "/"))));
+    }
+
+    #[test]
+    fn shortcut_script_reports_the_expected_kinds() {
+        let js = shortcuts_js();
+        for kind in ["'select'", "'reload'", "'hide'"] {
+            assert!(js.contains(kind), "{kind}");
+        }
+        assert!(js.contains("e.ctrlKey") && js.contains("invoke('shortcut'"));
     }
 
     #[test]

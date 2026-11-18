@@ -101,6 +101,18 @@ fn page_probe(hub: H, service: String, kind: String, value: serde_json::Value) {
 #[tauri::command]
 fn open_external(url: String) { native::open_url(&url); }
 
+/// Keyboard shortcuts on platforms where there's no app menu to own them (Windows): the pages report them here.
+/// kind: "select" (n = 1-based position in the sidebar), "reload" (the selected service) or "hide" (to the tray).
+#[tauri::command]
+fn shortcut(hub: H, kind: String, n: Option<usize>) {
+    match kind.as_str() {
+        "select" => { if let Some(n) = n.filter(|n| *n >= 1) { hub.select_index(n - 1); } }
+        "reload" => { let sel = hub.core.lock().unwrap().selected.clone(); hub.reload(&sel); }
+        "hide" => webviews::hide_window(&hub),
+        _ => {}
+    }
+}
+
 /// Entry point, called by the launcher.
 #[no_mangle]
 pub extern "C" fn huburt_main() {
@@ -111,7 +123,7 @@ pub fn run() {
     let hidden = std::env::args().any(|a| a == "--hidden");
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
-            get_state, select, reorder, show_menu, reload, set_enabled, page_notify, page_probe, open_external
+            get_state, select, reorder, show_menu, reload, set_enabled, page_notify, page_probe, open_external, shortcut
         ])
         .on_menu_event(|app, e| {
             if let Some(hub) = app.try_state::<Arc<Hub>>() { menus::handle(&hub, &e); }
@@ -123,6 +135,8 @@ pub fn run() {
             webviews::ensure_window(&hub);
             let bh = hub.clone();
             banner::init(Box::new(move |e| banner_event(&bh, e)));
+            // macOS: the app menu owns the keyboard shortcuts. Elsewhere there is no menu bar in the window; see `shortcut`.
+            #[cfg(target_os = "macos")]
             app.set_menu(menus::app_menu(app.handle())?)?;
             tray::init(&hub)?;
             hub.start();

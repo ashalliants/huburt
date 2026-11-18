@@ -102,7 +102,9 @@ pub fn show_service_menu(hub: &Arc<Hub>, id: &str, x: f64, y: f64) {
     let _ = tauri::menu::ContextMenu::popup_at(&menu, win, LogicalPosition::new(x, y));
 }
 
-/// The app menu (shown while the window is open): keyboard shortcuts and the Edit commands.
+/// The app menu (shown while the window is open): keyboard shortcuts and the Edit commands. macOS only: on Windows the
+/// pages handle the shortcuts themselves (see `shortcut` in lib.rs) and there is no menu bar in the window.
+#[cfg(target_os = "macos")]
 pub fn app_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let hide = MenuItem::with_id(app, "app:hide", "Hide Huburt to Menu Bar", true, Some("CmdOrCtrl+H"))?;
     let quit = MenuItem::with_id(app, "tray:quit", "Quit Huburt", true, None::<&str>)?;

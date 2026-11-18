@@ -4,5 +4,5 @@
   "description": "Hub's own sidebar page",
   "windows": ["main"],
   "webviews": ["ui", "cover"],
-  "permissions": ["core:default", "allow-get-state", "allow-select", "allow-reorder", "allow-show-menu", "allow-reload", "allow-set-enabled"]
+  "permissions": ["core:default", "allow-get-state", "allow-select", "allow-reorder", "allow-show-menu", "allow-reload", "allow-set-enabled", "allow-shortcut"]
 }

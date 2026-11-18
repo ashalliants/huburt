@@ -78,7 +78,7 @@ pub fn init(hub: &Arc<Hub>) -> tauri::Result<()> {
 pub fn update(hub: &Arc<Hub>, total: u32, summary: &str) {
     let Some(tray) = hub.app.tray_by_id("hub") else { return };
     let _ = tray.set_icon(Some(Image::new_owned(render(total > 0, is_dark(hub)), SIZE as u32, SIZE as u32)));
-    let _ = tray.set_tooltip(Some(format!("Huburt\n{summary}")));
+    let _ = tray.set_tooltip(Some(fit_tooltip(&format!("Huburt\n{summary}"))));
     if let Ok(m) = menus::tray_menu(hub) {
         let _ = tray.set_menu(Some(m));
     }
@@ -89,4 +89,39 @@ pub fn update(hub: &Arc<Hub>, total: u32, summary: &str) {
 pub fn is_dark(hub: &Arc<Hub>) -> bool {
     use tauri::Manager;
     hub.app.get_window("main").and_then(|w| w.theme().ok()).map(|t| t == tauri::Theme::Dark).unwrap_or(false)
+}
+
+/// Windows limits a notification-area tooltip to 127 characters; macOS has no such limit.
+fn fit_tooltip(text: &str) -> String {
+    const WINDOWS_MAX: usize = 120;
+    if cfg!(windows) { shorten(text, WINDOWS_MAX) } else { text.to_string() }
+}
+
+/// Cuts `text` to at most `max` characters, ending in an ellipsis, preferably at a line break.
+fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(max - 1).collect();
+    let cut = cut.rsplit_once('\n').map(|(whole_lines, _)| whole_lines.to_string()).filter(|s| s.chars().count() > 20).unwrap_or(cut);
+    format!("{}…", cut.trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_tooltips_are_left_alone() {
+        assert_eq!(shorten("Huburt\nSlack: all caught up", 120), "Huburt\nSlack: all caught up");
+    }
+
+    #[test]
+    fn long_tooltips_are_cut_at_a_line_break_within_the_limit() {
+        let text = "Huburt\nSlack: 12 DMs/mentions, 3 unread channels\nGmail: 150 unread emails\nWhatsApp: 20 unread chats\nNotifications paused until 18:00";
+        let out = shorten(text, 100);
+        assert!(out.chars().count() <= 100, "{out}");
+        assert!(out.ends_with('…') && out.starts_with("Huburt\nSlack: 12"), "{out}");
+        assert!(!out.contains("paused"));
+    }
 }
