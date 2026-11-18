@@ -34,7 +34,9 @@ pub enum Event {
 pub fn init(handler: Box<dyn Fn(Event) + Send + Sync + 'static>) {
     #[cfg(target_os = "macos")]
     mac::init(handler);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    win::init(handler);
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = handler;
 }
 
@@ -42,9 +44,37 @@ pub fn init(handler: Box<dyn Fn(Event) + Send + Sync + 'static>) {
 pub fn post(banner: Banner) {
     #[cfg(target_os = "macos")]
     mac::post(banner);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    win::post(banner);
+    #[cfg(not(any(target_os = "macos", windows)))]
     let _ = banner;
 }
+
+/// The XML for a Windows toast: the message, the service name as its source line, and (for Slack messages) a Reply box
+/// with a Send button and a Mark as Read button, like the macOS banners.
+#[cfg(any(windows, test))]
+fn toast_xml(banner: &Banner) -> String {
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+    }
+    let attribution = if banner.subtitle.is_empty() { String::new() } else { format!("<text placement=\"attribution\">{}</text>", esc(&banner.subtitle)) };
+    let actions = if banner.category.as_deref() == Some("slack.message") {
+        "<actions><input id=\"reply\" type=\"text\" placeHolderContent=\"Reply…\"/>\
+         <action content=\"Send\" arguments=\"reply\" activationType=\"foreground\" hint-inputId=\"reply\"/>\
+         <action content=\"Mark as Read\" arguments=\"markRead\" activationType=\"foreground\"/></actions>"
+    } else {
+        ""
+    };
+    format!(
+        "<toast launch=\"open\" activationType=\"foreground\"><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text>{attribution}</binding></visual>{actions}<audio src=\"ms-winsoundevent:Notification.Default\"/></toast>",
+        esc(&banner.title),
+        esc(&banner.body)
+    )
+}
+
+#[cfg(windows)]
+#[path = "banner_win.rs"]
+mod win;
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -274,5 +304,31 @@ mod mac {
             UNUserNotificationCenter::currentNotificationCenter()
                 .addNotificationRequest_withCompletionHandler(&req, Some(&done));
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn banner(category: Option<&str>) -> Banner {
+        Banner { title: "Sam in #ops".into(), subtitle: "Slack".into(), body: "deploy <now> & \"check\" it's up".into(), category: category.map(String::from), ..Default::default() }
+    }
+
+    #[test]
+    fn toast_text_is_escaped() {
+        let xml = toast_xml(&banner(None));
+        assert!(xml.contains("<text>Sam in #ops</text>"));
+        assert!(xml.contains("deploy &lt;now&gt; &amp; &quot;check&quot; it&apos;s up"), "{xml}");
+        assert!(xml.contains("<text placement=\"attribution\">Slack</text>"));
+        assert!(!xml.contains("<actions>"), "plain banners have no buttons");
+    }
+
+    #[test]
+    fn slack_messages_get_a_reply_box_and_mark_as_read() {
+        let xml = toast_xml(&banner(Some("slack.message")));
+        assert!(xml.contains("<input id=\"reply\" type=\"text\""));
+        assert!(xml.contains("arguments=\"reply\"") && xml.contains("hint-inputId=\"reply\""));
+        assert!(xml.contains("arguments=\"markRead\""));
     }
 }
