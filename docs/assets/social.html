@@ -1,0 +1,29 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Huburt social preview</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; width:1280px; height:640px; padding:70px 84px; color:#f8fafc; font:20px -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+         background:radial-gradient(1000px 520px at 85% 10%,#1e3a8a 0%,transparent 60%),linear-gradient(135deg,#0b1220,#0f1b34); position:relative; overflow:hidden; }
+  .brand { display:flex; align-items:center; gap:18px; }
+  .mark { width:68px; height:68px; border-radius:18px; background:linear-gradient(135deg,#3b82f6,#6366f1); display:grid; place-items:center; box-shadow:0 14px 30px -10px rgba(59,130,246,.7); }
+  .mark svg { width:40px; height:40px; stroke:#fff; fill:none; stroke-width:2.2; stroke-linecap:round; }
+  h1 { margin:0; font-size:84px; letter-spacing:-.03em; line-height:1; }
+  .tag { margin:30px 0 0; font-size:38px; line-height:1.25; max-width:880px; font-weight:600; letter-spacing:-.01em; }
+  .tag span { color:#93c5fd; }
+  .chips { display:flex; gap:14px; margin-top:34px; }
+  .chip { padding:9px 18px; border-radius:999px; background:rgba(255,255,255,.09); box-shadow:inset 0 0 0 1px rgba(255,255,255,.16); font-size:21px; font-weight:600; }
+  .svc { position:absolute; right:84px; bottom:74px; display:flex; gap:22px; }
+  .svc div { width:104px; height:104px; border-radius:26px; background:rgba(255,255,255,.08); box-shadow:inset 0 0 0 1px rgba(255,255,255,.18); display:grid; place-items:center; }
+  .svc svg { width:54px; height:54px; stroke:#e2e8f0; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+  .url { position:absolute; left:84px; bottom:54px; font-size:21px; color:#94a3b8; }
+</style></head><body>
+  <div class="brand"><div class="mark"><svg viewBox="0 0 48 48"><circle cx="12" cy="14" r="5.5"/><circle cx="36" cy="14" r="5.5"/><circle cx="24" cy="38" r="5.5"/><path d="M18 14h12M15 19l7 14M33 19l-7 14" stroke-dasharray="1 4.5"/></svg></div><h1>Huburt</h1></div>
+  <p class="tag">Slack, Gmail and WhatsApp in<br><span>one lightweight window.</span></p>
+  <div class="chips"><div class="chip">≈ 26 MB when idle</div><div class="chip">macOS + Windows</div><div class="chip">Open source</div></div>
+  <div class="svc">
+    <div><svg viewBox="0 0 24 24"><path d="M9.5 3.5 7.5 20.5M16.5 3.5l-2 17M4 8.5h16.5M3.5 15.5H20"/></svg></div>
+    <div><svg viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 0 0-7.3 12.8L3.5 20.5l4.3-1.1A8.5 8.5 0 1 0 12 3.5z"/><path d="M9 8.8c.2 3 2.7 5.5 6 6.2l1-1.6-2-1-.9.9c-.9-.4-1.7-1.2-2.1-2.1l.9-.9-1-2z"/></svg></div>
+    <div><svg viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="m4 7.5 8 6 8-6"/></svg></div>
+  </div>
+  <div class="url">github.com/ashalliants/huburt</div>
+</body></html>

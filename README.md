@@ -1,134 +1,136 @@
-# Huburt
+# Huburt: Slack, Gmail and WhatsApp in one lightweight window
 
-macOS and Windows.
+[![CI](https://github.com/ashalliants/huburt/actions/workflows/ci.yml/badge.svg)](https://github.com/ashalliants/huburt/actions/workflows/ci.yml)
+![Platforms: macOS and Windows](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows-blue)
+![Built with Tauri and Rust](https://img.shields.io/badge/built%20with-Tauri%20%2B%20Rust-orange)
 
-Slack, Gmail and WhatsApp in one window, with the smallest memory footprint we can manage. A like-for-like rewrite of the
-Swift app in `../Hub` using Tauri 2: Rust for the logic, each platform's own web engine for the pages (WebKit on macOS,
-WebView2 on Windows), so there is no bundled browser.
+**Huburt puts Slack, Gmail and WhatsApp in a single desktop window for macOS and Windows, and uses about 26 MB of memory when
+you're not looking at it.** It is a lightweight alternative to all-in-one messaging apps like Ferdium, Rambox and Franz for
+people who only need these three services and are tired of apps that eat gigabytes of RAM.
 
-Why it's small: pages are loaded only while you look at them. A sleeping service is just its unread poller (a few HTTP
-requests) or, for WhatsApp, a short wake every 5 minutes. With the window hidden and nothing loaded, the whole app is the
-Rust process plus WebKit's two shared helper processes.
+![What you see in Huburt: unread badges, a page waking up, a service turned off, and a friendly error](docs/images/tour.png)
 
-## Build and install
+## Why Huburt
 
-**macOS**
+- **Tiny when idle.** A service's page is only loaded while you're using it. After you look away it is closed and its memory
+  is freed, while a small background check keeps the unread count and new-message banners coming. With the window hidden and
+  nothing loaded, the whole app is about **26 MB** (see [Memory](#memory)).
+- **No bundled browser.** Huburt is built with [Tauri](https://tauri.app) (Rust). It uses the web engine already on your
+  computer (WebKit on macOS, WebView2 on Windows) instead of shipping its own copy of Chromium like Electron apps do.
+- **The real Slack, Gmail and WhatsApp Web.** You sign in once and use each site exactly as you would in a browser tab.
+  Nothing is proxied, copied or sent anywhere else (see [Privacy](docs/privacy.md)).
+- **Notifications that work like a chat app.** Banners for new Slack mentions and DMs have a **Reply** box and **Mark as
+  Read** button, so you can answer without opening anything. Click a banner to jump to the exact conversation or email.
+- **Built for people who are busy.** Menu bar or system tray icon with a red dot when something needs you, mute a service
+  for an hour or until tomorrow morning, pause everything, and a short "good morning, here's what's waiting" summary.
 
-    ./build.sh             # build, sign, and install the core library into ~/Library/Application Support/Huburt/
-    ./build.sh --install   # also copies Huburt.app to /Applications/Huburt.app (never touches /Applications/Hub.app)
+## Features
 
-**Windows**: download the installer (`Huburt_x.y.z_x64-setup.exe`, or the `.msi`) from the
-[Releases](../../releases) page. It installs for the current user (no admin rights) and needs the WebView2 runtime, which
-Windows 10/11 already include (the installer fetches it if missing). The installers aren't code-signed, so SmartScreen shows
-"Windows protected your PC": choose *More info* then *Run anyway*. To build it yourself:
+| | |
+|---|---|
+| **Services** | Slack (all your workspaces), Gmail, WhatsApp Web. Each keeps its own separate login. |
+| **Unread counts** | Per service, shown as badges in the sidebar and as a red dot on the menu bar / tray icon. Slack shows DMs and mentions, plus a quiet dot for unread channels. |
+| **Notifications** | Native banners; Reply and Mark as Read for Slack messages; click to open the exact conversation or email. |
+| **Memory** | Pages load on demand and unload after 5 minutes away. WhatsApp wakes for about 45 seconds every 5 minutes to sync. |
+| **Dark mode** | Follows your system. Sites with no dark theme of their own (Gmail) are darkened, with images left alone. |
+| **Slack "show as online"** | Optional: keep your Slack status active during work hours, or always. See the [FAQ](docs/FAQ.md#can-huburt-keep-my-slack-status-active). |
+| **Quiet controls** | Mute one service for an hour or until 8am, pause all notifications, hide the red dot until something new arrives. |
+| **Start at login** | Starts hidden in the menu bar / tray. |
+| **Safe links** | Links in messages open in your default browser. Sign-in pages (Google, Microsoft, Okta, GitHub...) stay inside the app, but only while you're signing in. |
+| **Keyboard** | Cmd/Ctrl + 1 to 3 switch service, Cmd/Ctrl + R reloads, Cmd/Ctrl + W hides to the tray. |
 
-    cargo install tauri-cli --version "^2" --locked
-    cargo tauri build --bundles nsis      # src-tauri/target/release/bundle/nsis/
+## Install
 
-Pushing a tag like `v0.1.0` makes GitHub Actions build the Windows installers and attach them to a release.
-CI (`.github/workflows/ci.yml`) lints, tests and builds on both macOS and Windows for every pull request.
+### Windows 10 and 11
 
-**Why there are two parts (macOS only).** macOS remembers "Always Allow" for WhatsApp's encryption key (stored by WebKit in the keychain)
-by the app's exact code, so signing with a stable certificate is not enough: every normal rebuild changed the hash and meant
-a prompt. So, like the Swift Hub, Huburt is split:
+Download `Huburt_x.y.z_x64-setup.exe` (or the `.msi`) from the [Releases](https://github.com/ashalliants/huburt/releases)
+page. It installs for the current user, needs no admin rights, and uses the WebView2 runtime that Windows already includes.
+The installers aren't code-signed yet, so Windows SmartScreen says "Windows protected your PC": choose **More info**, then
+**Run anyway**.
 
-- `src-tauri/src/main.rs` is a tiny launcher. It is the signed `Huburt.app` executable and never changes. It loads the real
-  app and calls `huburt_main()`.
-- `src-tauri/src/lib.rs` is the real app, built as `libhuburt_core.dylib` and loaded by the launcher from
-  `~/Library/Application Support/Huburt/` (`HUBURT_CORE=<path>` overrides it).
+> Windows support is new. It is built and tested by CI on a real Windows machine, but has had little hands-on use so far.
+> Please [report anything odd](https://github.com/ashalliants/huburt/issues).
 
-`build.sh` only replaces the library, and leaves an installed `Huburt.app` alone while the launcher's hash is unchanged.
-(Changing `main.rs`, `Info.plist` or the icon changes the hash and costs one "Always Allow". Don't edit the launcher casually.)
-The signing certificate is "Hub Local Signing", the same as the Swift app's (ad-hoc signing makes every build look new).
+### macOS
 
-Windows has no keychain approval to protect, so there it is one ordinary program. Needs Rust (stable) and `cargo install tauri-cli --version "^2" --locked`. Tests: `cd src-tauri && cargo test`
-(50 tests: the Slack and Gmail pollers against canned responses, the load/unload/wake-cycle state machine, and link rules).
+There is no downloadable macOS app yet (it would need Apple notarisation). Build it yourself in a few minutes:
 
-## First run
+```sh
+# one-time: install Rust (https://rustup.rs) and the Tauri CLI
+cargo install tauri-cli --version "^2" --locked
 
-Huburt keeps its own logins (it does not share the Swift app's), so sign in to Slack, Gmail and WhatsApp (scan the QR
-code) once. macOS also asks to allow notifications.
+git clone https://github.com/ashalliants/huburt.git
+cd huburt
+./build.sh --install        # builds, signs and installs /Applications/Huburt.app
+```
 
-## Layout
+macOS 14 (Sonoma) or newer is recommended; it has been tested on Apple silicon. See [Developing](docs/DEVELOPING.md) for the
+signing details.
 
-- `src-tauri/src/main.rs`: the launcher (see above). Everything else in `src-tauri/src/` is the core library.
-- `src-tauri/src/hub.rs`: the brain. Per-service state and a 250 ms scheduler: lazy load/unload, polling, WhatsApp wake
-  cycle, "show as online", daily greeting, muting and pausing. Mutate under the lock, collect actions, run them after.
-- `src-tauri/src/slack.rs`, `gmail.rs`, `http.rs`: the pollers (blocking HTTP, worker threads), tested with a mock `Http`.
-- `src-tauri/src/webviews.rs`: the window, the sidebar web view and the per-service web views (layout, links, downloads).
-- `src-tauri/src/services.rs`: the service list and the injected JavaScript (dark mode filter, notification shim).
-- `src-tauri/src/menus.rs`, `tray.rs`, `banner.rs` (native notification banners with Reply / Mark as Read), `native.rs`.
-- `ui/`: the sidebar and the "waking up / can't reach / turned off" covers (plain HTML/CSS/JS, no build step).
-- `src-tauri/capabilities/`: what the pages may call. Service pages can only report notifications, probe results and
-  external links.
-- `tools/measure.py`, `tools/memtest.sh`: memory measurement (see below).
+### First run
 
-## Logs and test switches
+Sign in to Slack, Gmail and WhatsApp (scan the QR code) once. Your logins stay on your computer, in the web engine's own
+storage. Allow notifications when asked.
 
-- Log: `~/Library/Logs/Huburt.log` (Windows: `%LOCALAPPDATA%\Huburt\Huburt.log`). Counts and status only; never message text or tokens.
-- Settings: `~/Library/Application Support/Huburt/settings.json` (Windows: `%APPDATA%\Huburt\settings.json`; `HUB_SETTINGS_DIR` overrides the folder).
-- Launch hidden (menu bar / notification area only): `--hidden`.
-- `HUB_IDLE_SECONDS`, `HUB_WAKE_INTERVAL`, `HUB_WAKE_AWAKE`, `HUB_WAKE_SETTLE`: shorten the timers.
-- `HUB_TEST_STEPS="select:slack:20,probe:slack:5,hide:30,show:5"` walks through states (seconds each; also
-  `online:work`, `disable:gmail`, `enable:gmail`). `HUB_TEST_GREETING=1` sends the daily greeting after 8 s.
-- `HUB_DEBUG_COOKIES=1` logs how many cookies each page's store holds (never their values).
-- macOS: run the bundle with `open -n --env NAME=value --stdout f --stderr f Huburt.app` (running the bare binary from a
-  sandboxed shell crashes in macOS image decoding). `HUBURT_CORE=<path>` loads a different core library.
+## How it works
 
-## Windows notes
+![A page loads while you use it, closes after five minutes away, and a light check keeps counts fresh](docs/images/how-it-works.png)
 
-Same features as macOS, with these platform differences:
-
-- **Notification area, not menu bar.** The tray icon is white or black to suit the taskbar theme; left-click shows or hides
-  the window, right-click opens the menu. Closing the window hides it to the tray. Hover text is cut to Windows' 127
-  characters.
-- **Toast notifications** with a Reply box (Send) and Mark as Read for Slack messages. Huburt registers its name for toasts
-  with a per-user registry key. A toast left in the Action Center from an earlier run can't be routed back once Huburt has
-  restarted, so it does nothing when clicked.
-- **Shortcuts:** Ctrl+1..9 switch service, Ctrl+R reloads, Ctrl+W / Ctrl+H hide to the tray. There is no menu bar in the
-  window; the pages handle the shortcuts themselves.
-- **Start at login** is a `Run` registry entry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), switched from the
-  tray menu. It's turned on at first launch of an installed copy.
-- Pages use WebView2's own browser identity (no user-agent override); each service has its own profile folder under
-  `%APPDATA%\local.huburt.app\stores\`, so logins stay separate.
+More detail, including how Slack and Gmail unread counts are read without a page open, is in
+[How it works](docs/DEVELOPING.md#how-it-works).
 
 ## Memory
 
-Measured with `tools/measure.py` (macOS physical footprint, the "Memory" column in Activity Monitor, summed over the app
-and the WebKit helper processes it owns), Nov 2026, both apps launched hidden in the menu bar:
+![Huburt idle is 26 MB; a signed-in Slack page held open is about 680 MB](docs/images/memory.png)
 
-| State | Swift Hub | Huburt |
-|---|---|---|
-| Idle, window hidden, every page unloaded | 37.5 MB (2 processes) | 26-28 MB (1 process) |
-| App process alone | 28-39 MB | 26-32 MB |
-| Window open | no extra process | +25 MB (the sidebar's web view) |
+Huburt's own footprint is small; the pages are the cost, and Huburt keeps them unloaded until you need them. The figures are
+macOS physical footprint (the "Memory" column in Activity Monitor) summed over the app and its helper processes, measured with
+[`tools/measure.py`](tools/measure.py). Windows numbers haven't been measured yet.
 
-Pages cost the same in both, because both use WebKit: a signed-out Slack page was 100-200 MB, WhatsApp's QR page about
-70 MB, a Gmail sign-in page about 45 MB. When the window is hidden the sidebar's web view is destroyed, which is why the idle
-numbers don't include it. Caveats: the Swift numbers are with real signed-in accounts and Huburt's are signed out (so
-its Slack and Gmail pages were only loaded briefly to look for credentials). Keeping Slack loaded for "show as online"
-costs 0.6-1.4 GB in either app, since it's the page itself.
+## Frequently asked questions
 
-`tools/memtest.sh` repeats the walk-through (select each service, then hide the window, measuring after each step).
+**Is there a lightweight alternative to Ferdium, Rambox or Franz?**
+Yes, if you only need Slack, Gmail and WhatsApp: that is what Huburt does. It doesn't bundle Chromium and it unloads pages
+you aren't using. If you need dozens of services, Ferdium or Rambox are better choices. See the
+[comparison](docs/comparison.md).
 
-## Known differences from the Swift app
+**How do I use Slack, Gmail and WhatsApp in one app on a Mac or PC?**
+Install Huburt, sign in to each once, and switch between them in the sidebar.
 
-- Separate logins (see First run).
-- On launch Slack and Gmail pages are loaded once, briefly, to pick up cookies and the Slack token (the Swift app could read
-  cookies without a page). They are kept in memory only.
-- "Can't reach" is detected by a 25 s timeout and retried every 30 s (no "network is back" hook).
-- Links: clicks on links to other sites open in the browser, and `window.open` is handled natively; redirects that the page
-  makes itself stay in the app, as in the Swift app.
-- The yellow minimise button minimises normally (it doesn't hide to the menu bar); Cmd+H, Cmd+W and the red cross do.
-  Cmd+Q does nothing, as only "Quit Huburt" quits. The window position isn't remembered.
-- The menu bar icon is drawn in code (white on dark, black on light menu bars). It doesn't follow the wallpaper tint.
+**How much RAM does it use?**
+About 26 MB with the window hidden and every page unloaded. While you use a service, that service's page uses what it
+normally does in a browser (a signed-in Slack page is several hundred MB), and it is freed again after 5 minutes away.
 
-## Not tested
+**Will I still get notifications for messages while a page is unloaded?**
+Yes. Slack and Gmail are checked every 30 and 60 seconds over plain HTTPS using your own login, and WhatsApp wakes briefly
+every 5 minutes. New messages become banners; WhatsApp can lag by up to 5 minutes.
 
-**Windows:** built and tested by CI (the unit tests, clippy, and the installers), but not yet used on a real Windows
-machine. The things most worth checking there: the placement of the sidebar, cover and service pages in the window (they are laid out so they never overlap), reading
-the pages' cookies (Gmail and Slack unread counts), the toast buttons, and the memory numbers (the table above is all macOS).
+**Is it private? Does it send my messages anywhere?**
+No servers, no accounts, no telemetry. The pages talk directly to Slack, Google and WhatsApp, and the background checks do too.
+Details: [Privacy](docs/privacy.md).
 
-**macOS, with real accounts:**
-The Slack and Gmail pollers, credential pickup and WhatsApp's wake cycle now work with signed-in accounts. The banner
-buttons (Reply, Mark as Read) have not been clicked yet.
+**Is it free and open source?**
+Yes. See [LICENSE](LICENSE).
+
+More answers (multiple accounts, adding other services, uninstalling, Slack status, Linux, and more) are in the
+[FAQ](docs/FAQ.md).
+
+## Limitations
+
+- Three services, fixed: Slack, Gmail and WhatsApp. Adding another is a code change, not a setting
+  (see [Contributing](CONTRIBUTING.md)).
+- One Gmail account for unread counts and banners (you can still switch accounts inside Gmail), and one WhatsApp account.
+- Slack and Gmail unread counts use the same web endpoints their own web apps use. They aren't official APIs, so a Slack or
+  Google change can break them until Huburt is updated.
+- Calls, huddles and screen sharing haven't been tested.
+- macOS builds aren't notarised and there's no download; Windows installers aren't code-signed.
+- Linux isn't supported.
+
+## Project
+
+- [Developing](docs/DEVELOPING.md): architecture, building, tests, logs and test switches, platform notes.
+- [FAQ](docs/FAQ.md) · [Comparison with Ferdium, Rambox and Franz](docs/comparison.md) · [Privacy](docs/privacy.md)
+- [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md)
+
+Slack, Gmail, WhatsApp and the other names used here belong to their owners. Huburt is an independent project and is not
+affiliated with or endorsed by them.
