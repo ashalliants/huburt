@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>How Huburt works</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin:0; width:1200px; height:520px; padding:40px 52px; font:16px -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",system-ui,sans-serif;
+         background:linear-gradient(135deg,#f6f8fc,#e7edf6); color:#0f172a; }
+  h1 { margin:0 0 4px; font-size:28px; letter-spacing:-.02em; }
+  p.sub { margin:0 0 24px; color:#475569; font-size:15px; }
+  .flow { display:grid; grid-template-columns:1fr 54px 1fr 54px 1fr; align-items:stretch; }
+  .card { background:#fff; border-radius:14px; padding:20px 22px; box-shadow:0 10px 26px -14px rgba(15,23,42,.35), 0 0 0 1px rgba(15,23,42,.07); }
+  .card .n { display:inline-grid; place-items:center; width:26px; height:26px; border-radius:50%; background:#2563eb; color:#fff; font-weight:700; font-size:13px; margin-bottom:10px; }
+  .card h2 { margin:0 0 8px; font-size:18px; } .card p { margin:0; color:#334155; font-size:14.5px; line-height:1.5; }
+  .tag { display:inline-block; margin-top:12px; padding:3px 10px; border-radius:999px; font-size:12.5px; font-weight:650; }
+  .t1 { background:#fee2e2; color:#991b1b; } .t2 { background:#ccfbf1; color:#115e59; } .t3 { background:#fef3c7; color:#92400e; }
+  .arrow { display:grid; place-items:center; color:#94a3b8; font-size:28px; }
+  .note { margin-top:22px; display:flex; gap:14px; }
+  .pill { flex:1; background:#fff; border-radius:12px; padding:14px 18px; font-size:14px; color:#334155; line-height:1.45; box-shadow:0 0 0 1px rgba(15,23,42,.07); }
+  .pill b { color:#0f172a; }
+</style></head><body>
+  <h1>How Huburt stays small</h1>
+  <p class="sub">A page only exists while you're using it. Everything else is a small background check.</p>
+  <div class="flow">
+    <div class="card"><div class="n">1</div><h2>You open a service</h2><p>Its real web page loads (WebKit on Mac, WebView2 on Windows). You use Slack, Gmail or WhatsApp exactly as in a browser.</p><span class="tag t1">page loaded: the big cost</span></div>
+    <div class="arrow">→</div>
+    <div class="card"><div class="n">2</div><h2>You look away for 5 minutes</h2><p>The page is closed and its memory is freed. Unread counts and new-message banners keep coming from a light check over plain HTTPS using your own login.</p><span class="tag t2">Slack every 30 s · Gmail every 60 s</span></div>
+    <div class="arrow">→</div>
+    <div class="card"><div class="n">3</div><h2>WhatsApp has no light check</h2><p>So it wakes for about 45 seconds every 5 minutes to sync, shows any new messages as banners, and goes back to sleep.</p><span class="tag t3">≈ 45 s of every 5 min</span></div>
+  </div>
+  <div class="note">
+    <div class="pill"><b>Window hidden?</b> Huburt's own interface is closed too. With nothing loaded the whole app is about 26 MB.</div>
+    <div class="pill"><b>Click a banner</b> and Huburt wakes that service and opens the exact conversation or email.</div>
+  </div>
+</body></html>

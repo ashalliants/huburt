@@ -1,0 +1,21 @@
+# Huburt
+
+> Huburt is a free, open-source desktop app for macOS and Windows that shows Slack, Gmail and WhatsApp in one window and uses very little memory (about 26 MB when idle, measured on macOS). It is a lightweight alternative to all-in-one messaging apps such as Ferdium, Rambox and Franz for people who only need these three services. Built with Tauri and Rust, it uses the system web engine (WebKit or WebView2) instead of bundling Chromium, loads each service's page only while it is being used, and keeps unread counts and notifications flowing through small background checks.
+
+Key facts:
+- Services: Slack (multiple workspaces), Gmail, WhatsApp Web. The set is fixed; other services are not supported yet.
+- Platforms: macOS (build from source; no download yet) and Windows 10/11 (installer on the Releases page, unsigned). Linux is not supported.
+- Memory: pages unload after 5 minutes away. Slack and Gmail are checked in the background every 30 and 60 seconds; WhatsApp wakes for about 45 seconds every 5 minutes.
+- Notifications: native banners; Slack banners have Reply and Mark as Read.
+- Privacy: no server, account or telemetry. Sessions stay in the OS web storage; background checks talk directly to Slack and Google with the user's own session.
+- Optional: keep Slack status active during work hours or always (keeps the Slack page loaded, which costs memory).
+- License: MIT.
+
+## Docs
+
+- [README](README.md): overview, install, FAQ summary, limitations
+- [FAQ](docs/FAQ.md): questions about alternatives to Ferdium/Rambox/Franz, memory use, notifications, accounts, privacy, installing, Slack status, problems
+- [Comparison](docs/comparison.md): Huburt vs Ferdium, Rambox, Franz, each service's own app, and browser tabs
+- [Privacy](docs/privacy.md): exactly what is stored and sent
+- [Developing](docs/DEVELOPING.md): architecture, how pages load and unload, building, tests, platform notes
+- [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md)

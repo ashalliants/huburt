@@ -1,0 +1,15 @@
+name: Feature or service request
+description: Suggest an improvement, or another service
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like Huburt to do?
+      description: If it's another service, say which, and whether it has an unread count that can be read without opening its page.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why does it matter to you?
