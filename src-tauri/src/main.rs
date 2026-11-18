@@ -29,7 +29,7 @@ fn main() {
 }
 
 /// Where to find the core library. `bundled_exists` says whether a file exists (a parameter so it can be tested).
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 fn core_path(env_override: Option<String>, exe: &std::path::Path, home: &str, bundled_exists: impl Fn(&std::path::Path) -> bool) -> String {
     if let Some(p) = env_override {
         return p;
@@ -69,7 +69,7 @@ fn main() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
     use std::path::Path;
