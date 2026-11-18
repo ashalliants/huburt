@@ -107,7 +107,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # the checksum file is written next to the folder, not into it, so it can't list itself
-          (cd assets && sha256sum *) > SHA256SUMS.txt
+          # Artifacts keep their folder structure (nsis/, msi/), so gather every file into one flat folder first. The checksum
+          # file is written outside that folder so it can't list itself.
+          mkdir flat
+          find assets -type f -exec cp {} flat/ \;
+          (cd flat && sha256sum *) > SHA256SUMS.txt
           cat SHA256SUMS.txt
-          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" assets/* SHA256SUMS.txt --clobber
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" flat/* SHA256SUMS.txt --clobber
