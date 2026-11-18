@@ -17,10 +17,13 @@ cd ..
 ./build.sh                       # macOS: build, sign, install the core library (see below)
 ./build.sh --install             # macOS: also copy Huburt.app to /Applications/Huburt.app
 cargo tauri build --bundles nsis # Windows: installer in src-tauri/target/release/bundle/nsis/
+./scripts/package-macos.sh       # macOS: the downloadable zip in dist/ (core inside the app, ad-hoc signed)
 ```
 
 CI (`.github/workflows/ci.yml`) lints, tests and builds on macOS and Windows for every pull request. Pushing a tag like
-`v0.1.0` runs `.github/workflows/release.yml`, which builds the Windows installers and attaches them to a GitHub release.
+`v0.1.1` (it must match the version in `tauri.conf.json`) runs `.github/workflows/release.yml`, which builds the Windows
+installers and the macOS zip, attaches them to a GitHub release together with SHA-256 checksums, and marks 0.x releases as
+pre-releases. The macOS zip is also built (and uploaded as an artifact) on every pull request.
 
 ## How it works
 
@@ -79,10 +82,14 @@ signing with a stable certificate isn't enough: every ordinary rebuild changed t
 
 - `main.rs` is a tiny launcher. It is the signed `Huburt.app` executable and never changes. It loads the real app and calls
   `huburt_main()`.
-- `lib.rs` is the real app, built as `libhuburt_core.dylib` and loaded by the launcher from
-  `~/Library/Application Support/Huburt/` (`HUBURT_CORE=<path>` overrides it).
+- `lib.rs` is the real app, built as `libhuburt_core.dylib`. The launcher looks for it in this order: `$HUBURT_CORE`; inside
+  the app bundle (`Contents/Frameworks`, how the downloadable zip ships it); then `~/Library/Application Support/Huburt/`
+  (how a local `./build.sh` updates it without touching the signed app).
 
-`build.sh` only replaces the library, and leaves an installed `Huburt.app` alone while the launcher's hash is unchanged.
+`build.sh` only replaces the library in Application Support, and leaves an installed `Huburt.app` alone while the launcher's hash
+is unchanged. `scripts/package-macos.sh` instead builds a self-contained, ad-hoc-signed copy for download (it never touches
+the development bundle). Signing for real, and notarising, would need an Apple Developer account: set `SIGN_IDENTITY` for
+the first part; `xcrun notarytool` isn't wired in yet.
 Changing `main.rs`, `Info.plist` or the icon changes the hash and costs one "Always Allow", so don't edit the launcher
 casually. Sign with a stable local certificate ("Hub Local Signing" in `build.sh`; ad-hoc signing makes every build look
 new). Windows has no keychain approval to protect, so there it is one ordinary program.

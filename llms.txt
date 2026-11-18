@@ -4,7 +4,7 @@
 
 Key facts:
 - Services: Slack (multiple workspaces), Gmail, WhatsApp Web. The set is fixed; other services are not supported yet.
-- Platforms: macOS (build from source; no download yet) and Windows 10/11 (installer on the Releases page, unsigned). Linux is not supported.
+- Platforms: macOS on Apple silicon (zip on the Releases page, ad-hoc signed so one-time approval is needed; Intel via build from source) and Windows 10/11 (installer on the Releases page, unsigned). Linux is not supported.
 - Memory: pages unload after 5 minutes away. Slack and Gmail are checked in the background every 30 and 60 seconds; WhatsApp wakes for about 45 seconds every 5 minutes.
 - Notifications: native banners; Slack banners have Reply and Mark as Read.
 - Privacy: no server, account or telemetry. Sessions stay in the OS web storage; background checks talk directly to Slack and Google with the user's own session.
