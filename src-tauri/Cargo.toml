@@ -1,0 +1,40 @@
+[package]
+name = "huburt"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "huburt_core"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "huburt"
+path = "src/main.rs"
+
+[features]
+# Embed the UI in the binary instead of expecting a dev server (what `cargo tauri build` enables for the launcher)
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["unstable", "tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSString", "NSDictionary", "NSArray", "NSSet", "NSError", "NSValue", "NSEnumerator", "NSBundle", "block2", "NSThread", "NSOperation", "NSUUID"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationAction", "UNNotificationCategory", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSettings", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

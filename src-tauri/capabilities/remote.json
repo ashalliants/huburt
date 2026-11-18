@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "remote",
+  "description": "The service pages may only report notifications, probe results and external links",
+  "windows": ["main"],
+  "webviews": ["svc-*"],
+  "remote": {
+    "urls": ["https://*.slack.com/*", "https://slack.com/*", "https://*.whatsapp.com/*", "https://*.google.com/*", "https://google.com/*"]
+  },
+  "permissions": ["allow-page-notify", "allow-page-probe", "allow-open-external"]
+}

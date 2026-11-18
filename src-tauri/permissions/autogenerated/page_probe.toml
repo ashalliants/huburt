@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-page-probe"
+description = "Enables the page_probe command without any pre-configured scope."
+commands.allow = ["page_probe"]
+
+[[permission]]
+identifier = "deny-page-probe"
+description = "Denies the page_probe command without any pre-configured scope."
+commands.deny = ["page_probe"]
