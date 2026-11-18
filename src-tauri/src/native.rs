@@ -101,6 +101,7 @@ pub fn post_greeting(_hub: &Arc<Hub>, title: &str, body: &str) { crate::notify_g
 
 // MARK: start at login
 
+#[cfg(any(target_os = "macos", test))]
 const LOGIN_LABEL: &str = "local.huburt.login";
 
 /// macOS: a LaunchAgent that starts Huburt hidden in the menu bar.

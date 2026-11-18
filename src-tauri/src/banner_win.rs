@@ -56,8 +56,8 @@ pub fn init(handler: Box<dyn Fn(Event) + Send + Sync + 'static>) {
 }
 
 pub fn post(banner: Banner) {
-    if let Some(tx) = SENDER.get() {
-        let _ = tx.lock().map(|tx| tx.send(banner));
+    if let Some(Ok(tx)) = SENDER.get().map(|tx| tx.lock()) {
+        let _ = tx.send(banner);
     }
 }
 
@@ -78,6 +78,9 @@ fn show(banner: &Banner) -> windows::core::Result<ToastNotification> {
     let doc = XmlDocument::new()?;
     doc.LoadXml(&HSTRING::from(toast_xml(banner)))?;
     let toast = ToastNotification::CreateToastNotification(&doc)?;
+    if let Some(id) = &banner.identifier {
+        toast.SetTag(&HSTRING::from(id.as_str()))?;   // a toast with the same tag replaces the earlier one
+    }
     let info = banner.user_info.clone();
     toast.Activated(&TypedEventHandler::new(move |_, args| {
         if let Some(handler) = HANDLER.get() {

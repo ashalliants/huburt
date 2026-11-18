@@ -1,5 +1,7 @@
 # Huburt
 
+macOS and Windows.
+
 Slack, Gmail and WhatsApp in one window, with the smallest memory footprint we can manage. A like-for-like rewrite of the
 Swift app in `../Hub` using Tauri 2: Rust for the logic, each platform's own web engine for the pages (WebKit on macOS,
 WebView2 on Windows), so there is no bundled browser.
@@ -10,10 +12,23 @@ Rust process plus WebKit's two shared helper processes.
 
 ## Build and install
 
+**macOS**
+
     ./build.sh             # build, sign, and install the core library into ~/Library/Application Support/Huburt/
     ./build.sh --install   # also copies Huburt.app to /Applications/Huburt.app (never touches /Applications/Hub.app)
 
-**Why there are two parts.** macOS remembers "Always Allow" for WhatsApp's encryption key (stored by WebKit in the keychain)
+**Windows**: download the installer (`Huburt_x.y.z_x64-setup.exe`, or the `.msi`) from the
+[Releases](../../releases) page. It installs for the current user (no admin rights) and needs the WebView2 runtime, which
+Windows 10/11 already include (the installer fetches it if missing). The installers aren't code-signed, so SmartScreen shows
+"Windows protected your PC": choose *More info* then *Run anyway*. To build it yourself:
+
+    cargo install tauri-cli --version "^2" --locked
+    cargo tauri build --bundles nsis      # src-tauri/target/release/bundle/nsis/
+
+Pushing a tag like `v0.1.0` makes GitHub Actions build the Windows installers and attach them to a release.
+CI (`.github/workflows/ci.yml`) lints, tests and builds on both macOS and Windows for every pull request.
+
+**Why there are two parts (macOS only).** macOS remembers "Always Allow" for WhatsApp's encryption key (stored by WebKit in the keychain)
 by the app's exact code, so signing with a stable certificate is not enough: every normal rebuild changed the hash and meant
 a prompt. So, like the Swift Hub, Huburt is split:
 
@@ -26,7 +41,7 @@ a prompt. So, like the Swift Hub, Huburt is split:
 (Changing `main.rs`, `Info.plist` or the icon changes the hash and costs one "Always Allow". Don't edit the launcher casually.)
 The signing certificate is "Hub Local Signing", the same as the Swift app's (ad-hoc signing makes every build look new).
 
-Needs Rust (stable) and `cargo install tauri-cli --version "^2" --locked`. Tests: `cd src-tauri && cargo test`
+Windows has no keychain approval to protect, so there it is one ordinary program. Needs Rust (stable) and `cargo install tauri-cli --version "^2" --locked`. Tests: `cd src-tauri && cargo test`
 (50 tests: the Slack and Gmail pollers against canned responses, the load/unload/wake-cycle state machine, and link rules).
 
 ## First run
@@ -50,14 +65,32 @@ code) once. macOS also asks to allow notifications.
 
 ## Logs and test switches
 
-- Log: `~/Library/Logs/Huburt.log`. Counts and status only; never message text or tokens.
-- Settings: `~/Library/Application Support/Huburt/settings.json` (`HUB_SETTINGS_DIR` overrides the folder).
-- Launch hidden (menu bar only): `--hidden`.
+- Log: `~/Library/Logs/Huburt.log` (Windows: `%LOCALAPPDATA%\Huburt\Huburt.log`). Counts and status only; never message text or tokens.
+- Settings: `~/Library/Application Support/Huburt/settings.json` (Windows: `%APPDATA%\Huburt\settings.json`; `HUB_SETTINGS_DIR` overrides the folder).
+- Launch hidden (menu bar / notification area only): `--hidden`.
 - `HUB_IDLE_SECONDS`, `HUB_WAKE_INTERVAL`, `HUB_WAKE_AWAKE`, `HUB_WAKE_SETTLE`: shorten the timers.
 - `HUB_TEST_STEPS="select:slack:20,probe:slack:5,hide:30,show:5"` walks through states (seconds each; also
   `online:work`, `disable:gmail`, `enable:gmail`). `HUB_TEST_GREETING=1` sends the daily greeting after 8 s.
-- Run the bundle with `open -n --env NAME=value --stdout f --stderr f Huburt.app` (running the bare binary from a
-  sandboxed shell crashes in macOS image decoding).
+- `HUB_DEBUG_COOKIES=1` logs how many cookies each page's store holds (never their values).
+- macOS: run the bundle with `open -n --env NAME=value --stdout f --stderr f Huburt.app` (running the bare binary from a
+  sandboxed shell crashes in macOS image decoding). `HUBURT_CORE=<path>` loads a different core library.
+
+## Windows notes
+
+Same features as macOS, with these platform differences:
+
+- **Notification area, not menu bar.** The tray icon is white or black to suit the taskbar theme; left-click shows or hides
+  the window, right-click opens the menu. Closing the window hides it to the tray. Hover text is cut to Windows' 127
+  characters.
+- **Toast notifications** with a Reply box (Send) and Mark as Read for Slack messages. Huburt registers its name for toasts
+  with a per-user registry key. A toast left in the Action Center from an earlier run can't be routed back once Huburt has
+  restarted, so it does nothing when clicked.
+- **Shortcuts:** Ctrl+1..9 switch service, Ctrl+R reloads, Ctrl+W / Ctrl+H hide to the tray. There is no menu bar in the
+  window; the pages handle the shortcuts themselves.
+- **Start at login** is a `Run` registry entry (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`), switched from the
+  tray menu. It's turned on at first launch of an installed copy.
+- Pages use WebView2's own browser identity (no user-agent override); each service has its own profile folder under
+  `%APPDATA%\local.huburt.app\stores\`, so logins stay separate.
 
 ## Memory
 
@@ -92,6 +125,10 @@ costs 0.6-1.4 GB in either app, since it's the page itself.
 
 ## Not tested
 
-Everything that needs real accounts was only tested against canned responses: the Slack and Gmail pollers, credential pickup,
-banner buttons, the reply and mark-as-read actions, WhatsApp's wake cycle with a signed-in session. Windows is not built
-yet (the data-folder-per-service branch is in place; banners, the start-at-login entry and the tray need Windows versions).
+**Windows:** built and tested by CI (the unit tests, clippy, and the installers), but not yet used on a real Windows
+machine. The things most worth checking there: the placement of the sidebar, cover and service pages in the window (they are laid out so they never overlap), reading
+the pages' cookies (Gmail and Slack unread counts), the toast buttons, and the memory numbers (the table above is all macOS).
+
+**macOS, with real accounts:**
+The Slack and Gmail pollers, credential pickup and WhatsApp's wake cycle now work with signed-in accounts. The banner
+buttons (Reply, Mark as Read) have not been clicked yet.
