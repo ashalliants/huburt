@@ -1,22 +1,32 @@
-//! Huburt's launcher. It is the signed app executable and it NEVER changes, so macOS keeps the approvals tied to it
+//! Huburt's launcher (macOS). It is the signed app executable and it NEVER changes, so macOS keeps the approvals tied to it
 //! (e.g. "Always Allow" for WhatsApp's encryption key in the keychain) across rebuilds. The real app is
 //! `huburt_core` (src/lib.rs), loaded from ~/Library/Application Support/Huburt/. Don't edit this file casually:
 //! changing it, the Info.plist or the icon changes the app's hash and costs one more "Always Allow".
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(target_os = "macos")]
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 
+#[cfg(target_os = "macos")]
 extern "C" {
     fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
     fn dlerror() -> *const c_char;
 }
 
+#[cfg(target_os = "macos")]
 fn fail(msg: &str) -> ! {
     eprintln!("huburt launcher: {msg}");
     std::process::exit(1);
 }
 
+/// Windows (and anywhere else): there is no keychain approval to protect, so this is just the program.
+#[cfg(not(target_os = "macos"))]
+fn main() {
+    huburt_core::run();
+}
+
+#[cfg(target_os = "macos")]
 fn main() {
     let path = std::env::var("HUBURT_CORE").unwrap_or_else(|_| {
         format!("{}/Library/Application Support/Huburt/libhuburt_core.dylib", std::env::var("HOME").unwrap_or_default())

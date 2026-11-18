@@ -1,6 +1,7 @@
 //! The window and its web views: one local UI web view (sidebar + covers) and one child web view per loaded service.
 use crate::{
     hub::Hub,
+    native,
     services::{self, SIGN_IN_HOSTS},
     types::Cookie,
 };
@@ -8,7 +9,7 @@ use std::{path::PathBuf, sync::Arc};
 use tauri::{
     webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder},
     window::WindowBuilder,
-    ActivationPolicy, LogicalPosition, LogicalSize, Manager, WebviewUrl, WindowEvent,
+    LogicalPosition, LogicalSize, Manager, WebviewUrl, WindowEvent,
 };
 
 pub const SIDEBAR_W: f64 = 80.0;
@@ -49,7 +50,7 @@ pub fn show_window(hub: &Arc<Hub>, pick_urgent: bool) {
     if pick_urgent && !was_visible {
         hub.select_most_urgent();
     }
-    let _ = hub.app.set_activation_policy(ActivationPolicy::Regular);
+    native::set_dock_icon_visible(&hub.app, true);
     let win = ensure_window(hub);
     let _ = win.show();
     let _ = win.set_focus();
@@ -68,7 +69,7 @@ pub fn hide_window(hub: &Arc<Hub>) {
     if let Some(w) = hub.app.get_window("main") {
         let _ = w.hide();
     }
-    let _ = hub.app.set_activation_policy(ActivationPolicy::Accessory);
+    native::set_dock_icon_visible(&hub.app, false);
     hub.set_window_visible(false);
     // Free the sidebar's web view too: while hidden, only the pages that must stay alive use memory
     if let Some(ui) = hub.app.get_webview("ui") {
@@ -208,7 +209,7 @@ pub fn create_service(hub: &Arc<Hub>, id: &'static str) {
 }
 
 fn unique_download_path(name: &str) -> PathBuf {
-    let dir = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Downloads");
+    let dir = native::downloads_dir();
     let p = std::path::Path::new(name);
     let (stem, ext) = (p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(), p.extension().map(|e| e.to_string_lossy().to_string()));
     let mut dest = dir.join(name);

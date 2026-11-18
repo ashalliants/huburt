@@ -21,10 +21,11 @@ use tauri::{Manager, State};
 
 pub use hub::MAX_BANNERS;
 
-/// ~/Library/Logs/Huburt.log (counts and status only; never message text or tokens)
+/// The log file, see `native::log_path` (counts and status only; never message text or tokens)
 pub fn log(msg: &str) {
     if cfg!(test) { return; }   // tests must never write to the real log
-    let path = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("Library/Logs/Huburt.log");
+    let path = native::log_path();
+    if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{} {msg}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
     }
@@ -118,7 +119,7 @@ pub fn run() {
         .setup(move |app| {
             let hub = Hub::new(app.handle().clone());
             app.manage(hub.clone());
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);   // menu bar only until the window opens
+            native::set_dock_icon_visible(app.handle(), false);   // menu bar only until the window opens
             webviews::ensure_window(&hub);
             let bh = hub.clone();
             banner::init(Box::new(move |e| banner_event(&bh, e)));
@@ -128,8 +129,7 @@ pub fn run() {
             hub.update_tray();
             if !hidden { webviews::show_window(&hub, true); }
             // First run from /Applications: start at login by default (can be switched off from the menu bar icon)
-            let in_applications = std::env::current_exe().map(|p| p.starts_with("/Applications/")).unwrap_or(false);
-            let first_run = in_applications && {
+            let first_run = native::is_installed() && {
                 let mut c = hub.core.lock().unwrap();
                 let first = !c.settings.login_item_configured;
                 if first { c.settings.login_item_configured = true; c.settings.save(); }
