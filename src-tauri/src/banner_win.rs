@@ -12,7 +12,7 @@ use windows::{
     core::{Interface, HSTRING},
     Data::Xml::Dom::XmlDocument,
     Foundation::{IPropertyValue, TypedEventHandler},
-    UI::Notifications::{IToastActivatedEventArgs2, ToastActivatedEventArgs, ToastNotification, ToastNotificationManager},
+    UI::Notifications::{ToastActivatedEventArgs, ToastNotification, ToastNotificationManager},
     Win32::{
         System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED},
         UI::Shell::SetCurrentProcessExplicitAppUserModelID,
@@ -79,9 +79,9 @@ fn show(banner: &Banner) -> windows::core::Result<ToastNotification> {
     doc.LoadXml(&HSTRING::from(toast_xml(banner)))?;
     let toast = ToastNotification::CreateToastNotification(&doc)?;
     let info = banner.user_info.clone();
-    toast.Activated(&TypedEventHandler::new(move |_, args: &Option<windows::core::IInspectable>| {
+    toast.Activated(&TypedEventHandler::new(move |_, args| {
         if let Some(handler) = HANDLER.get() {
-            handler(activation_event(args, &info));
+            handler(activation_event(&args, &info));
         }
         Ok(())
     }))?;
@@ -108,7 +108,7 @@ fn activation_event(args: &Option<windows::core::IInspectable>, info: &HashMap<S
 
 /// What was typed into the reply box, if anything.
 fn typed_text(args: &Option<windows::core::IInspectable>) -> Option<String> {
-    let input = args.as_ref()?.cast::<IToastActivatedEventArgs2>().ok()?.UserInput().ok()?;
+    let input = args.as_ref()?.cast::<ToastActivatedEventArgs>().ok()?.UserInput().ok()?;
     let value = input.Lookup(&HSTRING::from("reply")).ok()?;
     let text = value.cast::<IPropertyValue>().ok()?.GetString().ok()?.to_string();
     if text.is_empty() { None } else { Some(text) }
