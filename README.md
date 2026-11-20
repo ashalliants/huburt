@@ -51,9 +51,19 @@ The installers aren't code-signed yet, so Windows SmartScreen says "Windows prot
 > Windows support is new. It is built and tested by CI on a real Windows machine, but has had little hands-on use so far.
 > Please [report anything odd](https://github.com/ashalliants/huburt/issues).
 
-### macOS
+### macOS (Apple silicon)
 
-There is no downloadable macOS app yet (it would need Apple notarisation). Build it yourself in a few minutes:
+1. Download `Huburt_x.y.z_macos-arm64.zip` from the [Releases](https://github.com/ashalliants/huburt/releases) page, unzip it,
+   and drag **Huburt** to your Applications folder.
+2. The first time, macOS will refuse to open it ("Apple could not verify..."), because the app isn't notarised by Apple yet.
+   Approve it once, either way:
+   - In Terminal: `xattr -dr com.apple.quarantine /Applications/Huburt.app`, then open it; or
+   - open it, then go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway**.
+
+macOS 14 (Sonoma) or newer is recommended. It has been tested on Apple silicon (M-series) only.
+Each release is signed ad hoc, so macOS may ask you again to allow WhatsApp's encryption key after an update.
+
+**Intel Mac, or if you'd rather build it yourself** (about five minutes):
 
 ```sh
 # one-time: install Rust (https://rustup.rs) and the Tauri CLI
@@ -64,8 +74,8 @@ cd huburt
 ./build.sh --install        # builds, signs and installs /Applications/Huburt.app
 ```
 
-macOS 14 (Sonoma) or newer is recommended; it has been tested on Apple silicon. See [Developing](docs/DEVELOPING.md) for the
-signing details.
+A build you make yourself is signed with a local certificate, which avoids the "could not verify" step. See
+[Developing](docs/DEVELOPING.md#why-the-macos-build-has-two-parts) for the details.
 
 ### First run
 
@@ -123,7 +133,8 @@ More answers (multiple accounts, adding other services, uninstalling, Slack stat
 - Slack and Gmail unread counts use the same web endpoints their own web apps use. They aren't official APIs, so a Slack or
   Google change can break them until Huburt is updated.
 - Calls, huddles and screen sharing haven't been tested.
-- macOS builds aren't notarised and there's no download; Windows installers aren't code-signed.
+- The macOS download is Apple silicon only and isn't notarised (a one-time approval is needed); Windows installers aren't
+  code-signed.
 - Linux isn't supported.
 
 ## Project

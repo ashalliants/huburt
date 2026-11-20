@@ -1,29 +1,116 @@
 name: Release
 
-# Push a tag like v0.1.0 to build the Windows installers and attach them to a GitHub release.
-# (The macOS app is built locally with ./build.sh, signed with a local certificate.)
+# Push a tag like v0.1.1 to build the Windows installers and the macOS download and attach them, with checksums, to a GitHub
+# release. The tag must match the version in src-tauri/tauri.conf.json. Run it by hand (Actions tab) to rebuild an existing tag.
+#
+# Least privilege: the jobs that run build code (npx, cargo build scripts, dependencies) only get a read-only token, and no
+# job that builds also holds the token that can write to the release. Only `release` and `publish`, which run no build code,
+# can write.
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach to (for example v0.1.1)
+        required: true
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  release:
+    name: Create the release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - name: Check the tag matches the app version
+        run: |
+          version=$(jq -r .version src-tauri/tauri.conf.json)
+          [ "v$version" = "$TAG" ] || { echo "Tag $TAG doesn't match the app version $version"; exit 1; }
+      - name: Create the release if it doesn't exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 && exit 0
+          flag=""; case "$TAG" in v0.*) flag="--prerelease";; esac
+          gh release create "$TAG" --title "Huburt ${TAG#v}" --generate-notes $flag
+
+  windows:
+    name: Windows installers
+    needs: release
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
       - name: Build installers
         run: npx --yes @tauri-apps/cli@2 build --bundles nsis,msi
-      - name: Publish release
-        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+
+  macos:
+    name: macOS download
+    needs: release
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Build and package
+        run: ./scripts/package-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Attach to the release
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # Runs no build code: it only moves the finished files and their checksums onto the release.
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Checksums and upload
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" --title "Huburt $GITHUB_REF_NAME" --generate-notes \
-            src-tauri/target/release/bundle/nsis/*.exe src-tauri/target/release/bundle/msi/*.msi
+          # Artifacts keep their folder structure (nsis/, msi/), so gather every file into one flat folder first. The checksum
+          # file is written outside that folder so it can't list itself.
+          mkdir flat
+          find assets -type f -exec cp {} flat/ \;
+          (cd flat && sha256sum *) > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" flat/* SHA256SUMS.txt --clobber

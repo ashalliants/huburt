@@ -68,7 +68,7 @@ wake every 5 minutes. Nothing runs continuously.
 
 ### Does it work on Apple silicon and Intel Macs, and on Windows 10 and 11?
 
-It has been built and tested on Apple silicon. An Intel Mac build should work but hasn't been tried. On Windows, CI builds the
+The downloadable Mac build is for Apple silicon. An Intel Mac build from source should work but hasn't been tried. On Windows, CI builds the
 installer and runs the unit tests on a Windows machine; hands-on testing on Windows 10 and 11 is still to come.
 
 ## Notifications and unread counts
@@ -161,8 +161,17 @@ user without admin rights. The installers aren't code-signed yet, so SmartScreen
 
 ### How do I install it on a Mac?
 
-There is no download yet; build it from source (about five minutes, the steps are in the
-[README](../README.md#macos)). macOS 14 or newer is recommended.
+Download the `macos-arm64.zip` from [Releases](https://github.com/ashalliants/huburt/releases), unzip it, and drag Huburt to
+Applications. The first time, approve it once in Terminal with `xattr -dr com.apple.quarantine /Applications/Huburt.app`, or
+via **System Settings → Privacy & Security → Open Anyway** (macOS asks because the app isn't notarised yet). Details are in
+the [README](../README.md#macos-apple-silicon). It's Apple silicon only; on an Intel Mac, build it from source.
+
+### Why does macOS say Huburt "could not be verified" or "is damaged"?
+
+Apple only lets an app open without a warning if its developer has paid for an Apple developer account and had the app
+notarised. Huburt is free and open source and isn't notarised yet, so macOS asks you to approve it once. The command in the
+answer above removes the quarantine flag that your browser added to the download. You can check the download against the
+checksums on the release page, or build it yourself from source.
 
 ### How do I start it at login?
 
@@ -213,10 +222,12 @@ Again**.
 Right-click the service and choose **Back to ... Home**. (Links in messages open in your browser, so this shouldn't happen;
 if it does, please report which link.)
 
-### macOS keeps asking to allow a keychain item after I rebuild
+### macOS keeps asking to allow a keychain item
 
-Huburt is built so this happens once: a small launcher that never changes is the signed app, and the real code is a separate
-library. If you edit the launcher, `Info.plist` or the icon you will be asked once more. See
+Huburt's downloadable builds are signed ad hoc, so macOS sees each new release as a new app and asks once to allow WhatsApp's
+encryption key. If you build it yourself, the app is split into a small launcher that never changes and the real code in a
+separate library, so rebuilding doesn't ask again. (If you edit the launcher, `Info.plist` or the icon you will be asked once
+more.) See
 [Developing](DEVELOPING.md#why-the-macos-build-has-two-parts).
 
 ### Windows says "Windows protected your PC"
