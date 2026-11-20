@@ -76,8 +76,8 @@ installer and runs the unit tests on a Windows machine; hands-on testing on Wind
 ### Will I get notifications while a page is unloaded?
 
 Yes. Slack is checked every 30 seconds and Gmail every 60 seconds using your existing login, and new mentions, DMs and emails
-become native banners. WhatsApp has no equivalent light check, so it wakes for about 45 seconds every 5 minutes; new WhatsApp
-messages can arrive up to 5 minutes late while it is asleep. While a WhatsApp page is open you get its normal live
+become native banners. WhatsApp has no equivalent light check, so it wakes for about 45 seconds every 5 minutes (not at all if
+it's turned off or you're signed out); new WhatsApp messages can arrive up to 5 minutes late while it is asleep. While a WhatsApp page is open you get its normal live
 notifications.
 
 ### Can I reply to a Slack message from the notification?
@@ -90,6 +90,13 @@ buttons; clicking any banner opens that service. (Button behaviour on Windows is
 Right-click a service in the sidebar to mute it for an hour or until 8am, or use the menu bar / tray icon's **Pause
 Notifications**. Unread counts keep updating while muted. **Hide Red Dot Until Something New** clears the icon's red dot
 without marking anything as read.
+
+### Does Huburt keep waking a service I'm signed out of, or have turned off?
+
+No. A service you've turned off (right-click it, **Turn Off**) isn't loaded, checked or woken at all. A service you're signed out of
+(the orange "!") is also left completely alone: Huburt looks once, when you first start it, to find out whether you're signed in,
+remembers the answer, and then stops, so WhatsApp's QR screen isn't loaded every 5 minutes for nothing. Click the service whenever
+you want to sign in: it opens normally, and as soon as you're signed in the background checks start again by themselves.
 
 ### What does the grey dot on Slack mean?
 
@@ -209,8 +216,9 @@ It's off by default.
 
 ### Gmail or WhatsApp shows an orange "!" (signed out)
 
-That means Huburt thinks you're signed out. Open the service, sign in again, and the "!" clears by itself within a few seconds
-for WhatsApp, or at the next check for Gmail. If it doesn't, right-click the service and choose **Reload**.
+That means Huburt thinks you're signed out, so it leaves that service alone in the background. Open the service and sign in
+again, and the "!" clears by itself within a few seconds for WhatsApp, or at the next check for Gmail, and the background checks
+resume. If it doesn't, right-click the service and choose **Reload**.
 
 ### Gmail or Slack shows "Can't reach"
 

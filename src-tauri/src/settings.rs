@@ -17,6 +17,9 @@ pub struct Settings {
     pub gmail_source: String,
     pub last_greeting_day: String,
     pub login_item_configured: bool,
+    /// Services that were signed out when last seen. Remembered so a signed-out service stays completely quiet (no background
+    /// page loads) from the moment Huburt starts, until you open it and sign in.
+    pub signed_out: Vec<String>,
 }
 
 impl Default for Settings {
@@ -31,6 +34,7 @@ impl Default for Settings {
             gmail_source: "important".into(),
             last_greeting_day: String::new(),
             login_item_configured: false,
+            signed_out: vec![],
         }
     }
 }

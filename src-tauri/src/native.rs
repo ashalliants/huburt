@@ -27,8 +27,12 @@ pub fn settings_dir() -> PathBuf {
     }
 }
 
-/// The log file. macOS: ~/Library/Logs/Huburt.log. Windows: %LOCALAPPDATA%\Huburt\Huburt.log.
+/// The log file. macOS: ~/Library/Logs/Huburt.log. Windows: %LOCALAPPDATA%\Huburt\Huburt.log. `HUB_LOG_FILE` overrides it
+/// (for testing a second copy without mixing its log with the one you're using).
 pub fn log_path() -> PathBuf {
+    if let Ok(p) = std::env::var("HUB_LOG_FILE") {
+        return PathBuf::from(p);
+    }
     if cfg!(windows) {
         PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Huburt").join("Huburt.log")
     } else {

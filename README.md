@@ -31,7 +31,7 @@ people who only need these three services and are tired of apps that eat gigabyt
 | **Services** | Slack (all your workspaces), Gmail, WhatsApp Web. Each keeps its own separate login. |
 | **Unread counts** | Per service, shown as badges in the sidebar and as a red dot on the menu bar / tray icon. Slack shows DMs and mentions, plus a quiet dot for unread channels. |
 | **Notifications** | Native banners; Reply and Mark as Read for Slack messages; click to open the exact conversation or email. |
-| **Memory** | Pages load on demand and unload after 5 minutes away. WhatsApp wakes for about 45 seconds every 5 minutes to sync. |
+| **Memory** | Pages load on demand and unload after 5 minutes away. WhatsApp wakes for about 45 seconds every 5 minutes to sync, but a service that's turned off, or that you're signed out of, does nothing in the background at all. |
 | **Dark mode** | Follows your system. Sites with no dark theme of their own (Gmail) are darkened, with images left alone. |
 | **Slack "show as online"** | Optional: keep your Slack status active during work hours, or always. See the [FAQ](docs/FAQ.md#can-huburt-keep-my-slack-status-active). |
 | **Quiet controls** | Mute one service for an hour or until 8am, pause all notifications, hide the red dot until something new arrives. |

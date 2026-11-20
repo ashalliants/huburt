@@ -42,6 +42,12 @@ Pollers need cookies (and, for Slack, a workspace token) that only a loaded page
 for a few seconds to pick them up. They are kept in memory only, and refreshed from the page before each poll while it is
 open. Pollers are blocking code run on worker threads, and are tested against a mock HTTP layer.
 
+**Signed-out and turned-off services stay quiet.** A service that is turned off is never visited by the scheduler. One that is
+signed out (the "!") is never woken or reloaded in the background either: Huburt learns it is signed out once (the startup
+credential look, or the end of a WhatsApp wake), saves that in the settings (`signed_out`), and stays quiet from the next start
+on. Opening the service always loads it, and while the page is open the sign-in is watched for, which clears the state and lets
+the background work resume.
+
 **WhatsApp has no light check.** It follows a sleep cycle instead: wake the page for up to 45 seconds every 5 minutes, let it
 sync (the page itself raises notifications through a shim that turns web notifications into native banners), then unload.
 
@@ -119,6 +125,7 @@ new). Windows has no keychain approval to protect, so there it is one ordinary p
 - `HUB_TEST_STEPS="select:slack:20,probe:slack:5,hide:30,show:5"` walks through states (seconds each; also `online:work`,
   `disable:gmail`, `enable:gmail`). `HUB_TEST_GREETING=1` sends the daily greeting after 8 seconds.
 - `HUB_DEBUG_COOKIES=1` logs how many cookies each page's store holds (never their values).
+- `HUB_LOG_FILE=<path>` writes the log somewhere else (to test a second copy without mixing its log with your own).
 - macOS: run the bundle with `open -n --env NAME=value --stdout f --stderr f Huburt.app`. `HUBURT_CORE=<path>` loads a
   different core library.
 

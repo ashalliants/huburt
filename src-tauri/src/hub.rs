@@ -83,7 +83,6 @@ pub struct Svc {
     pub cred_wake: bool,
     pub cred_tries: u32,
     pub next_cred_check: Instant,
-    pub last_cred_wake: Option<Instant>,
     // Slack "show as online"
     pub keeping_online: bool,
     pub last_presence_ping: Option<Instant>,
@@ -117,6 +116,8 @@ pub enum Action {
     State,
     /// The menu bar icon and hover summary need refreshing.
     Banner,
+    /// Write the settings file (done outside the core lock).
+    Save,
 }
 
 pub struct Hub {
@@ -180,7 +181,7 @@ impl Svc {
             error_since: None,
             unread: 0,
             quiet: 0,
-            signed_out: false,
+            signed_out: settings.signed_out.iter().any(|d| d == def.id),
             last_checked: None,
             needs_creds: poller.as_ref().map(|p| p.needs_credentials()).unwrap_or(false),
             harvest_js: poller.as_ref().and_then(|p| p.harvest_js()),
@@ -208,7 +209,6 @@ impl Svc {
             cred_wake: false,
             cred_tries: 0,
             next_cred_check: now,
-            last_cred_wake: None,
             keeping_online: false,
             last_presence_ping: None,
         }
@@ -314,10 +314,18 @@ impl Core {
         }
     }
 
+    /// Keeps the settings' list of signed-out services in step (the caller saves the file).
+    fn remember_signed_out(settings: &mut Settings, id: &str, signed_out: bool) {
+        settings.signed_out.retain(|d| d != id);
+        if signed_out { settings.signed_out.push(id.to_string()); }
+    }
+
     pub fn set_signed_out(&mut self, id: &'static str, v: bool, acts: &mut Vec<Action>) {
         let Some(s) = self.svcs.get_mut(id) else { return };
         if s.signed_out == v { return; }
         s.signed_out = v;
+        Self::remember_signed_out(&mut self.settings, id, v);
+        acts.push(Action::Save);
         crate::log(&format!("{id} {}", if v { "signed out" } else { "signed in again" }));
         if v {
             acts.push(Action::Notify(s.def, NotificationItem {
@@ -346,6 +354,7 @@ impl Core {
             s.loaded = false; s.ready = false;
             s.idle_deadline = None; s.wake_session = false; s.cred_wake = false; s.unread = 0; s.quiet = 0;
             s.last_checked = None; s.error = None; s.signed_out = false; s.keeping_online = false;
+            Self::remember_signed_out(&mut self.settings, def.id, false);
             s.poll_gen += 1;
             if let Some(p) = &s.poller { p.reconfigure(None, true); }
             self.settings.disabled.push(def.id.to_string());
@@ -467,10 +476,9 @@ impl Core {
         // Polling: while asleep, or all the time for services whose poller is the source of truth
         if s.has_poller {
             if !s.loaded && s.needs_credentials() {
-                // Signed out: don't reload the page every poll just to look for a login that isn't there
-                let recently = s.last_cred_wake.map(|t| now.duration_since(t) < Duration::from_secs(600)).unwrap_or(false);
-                if !s.cred_wake && !(s.signed_out && recently) && now >= s.next_poll {
-                    s.last_cred_wake = Some(now);
+                // Signed out: never reload the page to look for a login that isn't there. It stays quiet until you open the
+                // service and sign in yourself.
+                if !s.cred_wake && !s.signed_out && now >= s.next_poll {
                     s.cred_wake = true;
                     s.cred_tries = 0;
                     s.next_cred_check = now + Duration::from_secs(2);
@@ -490,7 +498,10 @@ impl Core {
             if !needs || s.cred_tries > 30 {
                 s.cred_wake = false;
                 if needs {
+                    // the page never produced a login: remember that, so it isn't loaded again until you open it
                     s.signed_out = true;
+                    Self::remember_signed_out(&mut self.settings, id, true);
+                    acts.push(Action::Save);
                     acts.push(Action::State);
                 }
                 if !visible && s.loaded && !s.wake_session { acts.push(Action::Unload(id)); }
@@ -499,7 +510,11 @@ impl Core {
 
         // Sleep cycle (no cheap poller): wake the page now and then to sync
         if let Some(c) = s.def.sleep_cycle.as_ref() {
-            if !s.loaded && !s.wake_session {
+            if !s.loaded && !s.wake_session && s.signed_out {
+                // Signed out (or the QR code is showing): waking the page would only load the sign-in screen, which is
+                // heavy for nothing. Stay asleep until you open it and sign in; the next wake is then a full interval away.
+                s.next_wake = None;
+            } else if !s.loaded && !s.wake_session {
                 let interval = env_secs("HUB_WAKE_INTERVAL", c.interval);
                 let due = *s.next_wake.get_or_insert_with(|| now + if s.did_first_wake { interval } else { Duration::from_secs(5) });
                 if now >= due {
@@ -661,6 +676,7 @@ impl Hub {
                 Action::Layout => webviews::layout(self),
                 Action::State => self.emit_state(),
                 Action::Banner => self.update_tray(),
+                Action::Save => { let s = self.core.lock().unwrap().settings.clone(); s.save(); }
                 Action::Probe(id, kind, js) => webviews::eval(self, id, &services::probe_js(id, kind, &js)),
                 Action::Poll(id, generation) => self.spawn_poll(id, generation),
                 Action::Presence(id) => self.spawn_presence(id),
@@ -1196,14 +1212,123 @@ mod tests {
     }
 
     #[test]
-    fn a_signed_out_service_is_not_reloaded_every_poll() {
+    fn a_signed_out_slack_or_gmail_is_never_reloaded_to_look_for_a_login() {
+        for id in ["slack", "gmail"] {
+            let mut c = core();
+            c.svcs.get_mut(id).unwrap().signed_out = true;   // needs credentials too, as a signed-out service does
+            let t0 = Instant::now();
+            for minutes in [0u64, 1, 11, 30, 120, 600] {
+                let mut acts = vec![];
+                c.tick_service(id, t0 + Duration::from_secs(minutes * 60), &mut acts);
+                assert!(!has_load(&acts, id), "{id} must stay quiet while signed out (after {minutes} min)");
+            }
+        }
+    }
+
+    #[test]
+    fn a_signed_out_whatsapp_never_wakes_and_resumes_once_you_sign_in() {
+        let mut c = core();
+        c.set_signed_out("whatsapp", true, &mut vec![]);
+        let t0 = Instant::now();
+        for minutes in [0u64, 1, 6, 30, 60, 600] {
+            let mut acts = vec![];
+            c.tick_service("whatsapp", t0 + Duration::from_secs(minutes * 60), &mut acts);
+            assert!(!has_load(&acts, "whatsapp"), "no wake while signed out (after {minutes} min)");
+        }
+        // signing in (the page, opened by you, notices the chat list) brings the wake cycle back, a full interval away
+        let later = t0 + Duration::from_secs(600 * 60);
+        c.set_signed_out("whatsapp", false, &mut vec![]);
+        let mut acts = vec![];
+        c.tick_service("whatsapp", later, &mut acts);
+        assert!(!has_load(&acts, "whatsapp"), "not straight away");
+        let mut acts = vec![];
+        c.tick_service("whatsapp", later + Duration::from_secs(6 * 60), &mut acts);
+        assert!(has_load(&acts, "whatsapp"), "then it syncs on its normal cycle again");
+    }
+
+    #[test]
+    fn opening_a_signed_out_service_still_loads_it_so_you_can_sign_in() {
+        // Staying quiet in the background must never stop you opening the service to sign in.
+        for id in ["slack", "gmail", "whatsapp"] {
+            let mut c = core();
+            c.set_signed_out(services::service(id).unwrap().id, true, &mut vec![]);
+            c.window_visible = true;
+            c.selected = id.into();
+            let mut acts = vec![];
+            c.refresh_visibility(&mut acts);
+            assert!(has_load(&acts, id), "selecting signed-out {id} must load its page");
+        }
+    }
+
+    #[test]
+    fn a_signed_out_page_you_opened_keeps_watching_for_the_sign_in_and_is_not_unloaded_under_you() {
+        let mut c = core();
+        c.set_signed_out("whatsapp", true, &mut vec![]);
+        c.window_visible = true;
+        c.selected = "whatsapp".into();
+        c.svcs.get_mut("whatsapp").unwrap().loaded = true;
+        let t0 = Instant::now();
+        let mut acts = vec![];
+        c.refresh_visibility(&mut acts);
+        assert!(c.svcs["whatsapp"].idle_deadline.is_none(), "a page you're looking at is never scheduled to unload");
+        let mut acts = vec![];
+        c.tick_service("whatsapp", t0, &mut acts);
+        assert!(acts.iter().any(|a| matches!(a, Action::Probe("whatsapp", "loggedout", _))), "it checks whether you have signed in");
+        // and once the check says you're in, the service is no longer signed out (and that is remembered)
+        let mut acts = vec![];
+        c.set_signed_out("whatsapp", false, &mut acts);
+        assert!(!c.svcs["whatsapp"].signed_out && c.settings.signed_out.is_empty());
+    }
+
+    #[test]
+    fn a_disabled_service_never_wakes_or_loads() {
+        let mut c = core();
+        for id in ["slack", "gmail", "whatsapp"] { c.svcs.get_mut(id).unwrap().enabled = false; }
+        let t0 = Instant::now();
+        for minutes in [0u64, 1, 6, 11, 60, 600] {
+            let mut acts = vec![];
+            c.tick(t0 + Duration::from_secs(minutes * 60), &mut acts);
+            for id in ["slack", "gmail", "whatsapp"] {
+                assert!(!has_load(&acts, id) && !acts.iter().any(|a| matches!(a, Action::Poll(i, _) if *i == id)), "{id} must do nothing while turned off");
+            }
+        }
+    }
+
+    #[test]
+    fn signed_out_is_remembered_so_a_restart_stays_quiet_too() {
+        let mut c = core();
+        let mut acts = vec![];
+        c.set_signed_out("whatsapp", true, &mut acts);
+        assert_eq!(c.settings.signed_out, vec!["whatsapp".to_string()]);
+        assert!(acts.iter().any(|a| matches!(a, Action::Save)), "the change is saved");
+
+        // a new start with that settings file: signed out from the first moment, and no wake is ever scheduled
+        let mut restarted = Core::new(c.settings.clone(), Duration::from_secs(300));
+        assert!(restarted.svcs["whatsapp"].signed_out && !restarted.svcs["slack"].signed_out);
+        let mut acts = vec![];
+        restarted.tick_service("whatsapp", Instant::now() + Duration::from_secs(3600), &mut acts);
+        assert!(!has_load(&acts, "whatsapp"));
+
+        // signing in again forgets it
+        c.set_signed_out("whatsapp", false, &mut vec![]);
+        assert!(c.settings.signed_out.is_empty());
+    }
+
+    #[test]
+    fn a_failed_first_look_for_a_login_is_remembered_too() {
+        // At startup the page is loaded once to pick up credentials; if none ever appear the service is signed out, and that
+        // must be remembered so it isn't loaded again at the next start.
         let mut c = core();
         let s = c.svcs.get_mut("gmail").unwrap();
-        s.signed_out = true;
-        s.last_cred_wake = Some(Instant::now());
+        s.cred_wake = true;
+        s.loaded = true;
+        s.cred_tries = 31;
+        s.next_cred_check = Instant::now() - Duration::from_secs(1);
         let mut acts = vec![];
         c.tick_service("gmail", Instant::now(), &mut acts);
-        assert!(!has_load(&acts, "gmail"));
+        assert!(c.svcs["gmail"].signed_out);
+        assert_eq!(c.settings.signed_out, vec!["gmail".to_string()]);
+        assert!(acts.iter().any(|a| matches!(a, Action::Save)));
     }
 
     #[test]
