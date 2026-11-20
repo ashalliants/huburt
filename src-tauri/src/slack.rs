@@ -727,7 +727,7 @@ impl Poller for SlackPoller {
 
     /// Tells Slack you're active ("auto" clears a manual away) and logs what Slack now reports for you.
     /// False if there's no token yet.
-    fn keep_online(&mut self) -> bool {
+    fn keep_online(&mut self, keep_going: &dyn Fn() -> bool) -> bool {
         if self.teams.is_empty() {
             return false;
         }
@@ -736,18 +736,31 @@ impl Poller for SlackPoller {
         };
         let ok = |o: &Option<Value>| if o.is_some() { "ok" } else { "failed" };
         for team in self.teams.clone() {
+            // asked before every request: a ping is four of them, and the service may have been found signed out meanwhile
+            if !keep_going() {
+                return false;
+            }
             let set = self.call("users.setPresence", &team, &cookie, "&presence=auto");
+            if !keep_going() {
+                return false;
+            }
             let active = self.call("users.setActive", &team, &cookie, "");
             let head = format!(
                 "slack presence: setPresence {}, setActive {}",
                 ok(&set),
                 ok(&active)
             );
+            if !keep_going() {
+                return false;
+            }
             let me = self.call("auth.test", &team, &cookie, "");
             let Some(id) = me.as_ref().and_then(|m| m["user_id"].as_str()) else {
                 log(&head);
                 continue;
             };
+            if !keep_going() {
+                return false;
+            }
             let p = self.call("users.getPresence", &team, &cookie, &format!("&user={id}"));
             let now = p
                 .as_ref()
@@ -864,7 +877,7 @@ mod tests {
         let mut p = SlackPoller::with_http(Box::new(m));
         assert!(p.poll().is_none());
         assert!(!p.signed_out());
-        assert!(!p.keep_online());
+        assert!(!p.keep_online(&|| true));
         p.set_credentials(Credentials {
             cookies: vec![],
             page_data: Some(
@@ -1305,7 +1318,7 @@ mod tests {
             "users.getPresence",
             r#"{"ok":true,"presence":"active"}"#,
         );
-        assert!(p.keep_online());
+        assert!(p.keep_online(&|| true));
         assert_eq!(
             methods(&log),
             [
@@ -1324,10 +1337,32 @@ mod tests {
     #[test]
     fn keep_online_stops_when_auth_test_fails() {
         let (mut p, _r, log) = setup();
-        assert!(p.keep_online());
+        assert!(p.keep_online(&|| true));
         assert_eq!(
             methods(&log),
             ["users.setPresence", "users.setActive", "auth.test"]
         );
+    }
+
+    #[test]
+    fn keep_online_stops_between_requests_once_called_off() {
+        // The ping is several requests; if the service is found signed out partway through, the rest must not be sent.
+        let (mut p, r, log) = setup();
+        route(&r, "users.setPresence", r#"{"ok":true}"#);
+        route(&r, "users.setActive", r#"{"ok":true}"#);
+        route(&r, "auth.test", r#"{"ok":true,"user_id":"U42"}"#);
+        route(&r, "users.getPresence", r#"{"ok":true,"presence":"active"}"#);
+        let asked = std::cell::Cell::new(0);
+        let allow_two_requests = || {
+            asked.set(asked.get() + 1);
+            asked.get() <= 2
+        };
+        assert!(!p.keep_online(&allow_two_requests), "called off, so it reports that it was not (fully) sent");
+        assert_eq!(methods(&log), ["users.setPresence", "users.setActive"], "nothing after the point it was called off");
+
+        // called off before the first request: nothing at all is sent
+        let (mut p, _r, log) = setup();
+        assert!(!p.keep_online(&|| false));
+        assert!(methods(&log).is_empty());
     }
 }

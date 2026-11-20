@@ -190,10 +190,17 @@ fn link_guard_js(def: &services::Service) -> String {
     )
 }
 
-pub fn create_service(hub: &Arc<Hub>, id: &'static str) { on_ui(hub, "create service", move |h| create_service_now(h, id)); }
+pub fn create_service(hub: &Arc<Hub>, id: &'static str, background: bool) { on_ui(hub, "create service", move |h| create_service_now(h, id, background)); }
 
-fn create_service_now(hub: &Arc<Hub>, id: &'static str) {
+fn create_service_now(hub: &Arc<Hub>, id: &'static str, background: bool) {
     let Some(def) = services::service(id) else { return };
+    // A background load was approved a moment ago, under the core lock; this job runs later. If the service was found signed out
+    // (or turned off) in between, don't create the page, and say it isn't loading after all.
+    if !hub.core.lock().unwrap().confirm_load(id, background) {
+        hub.emit_state();
+        layout(hub);
+        return;
+    }
     let win = ensure_window(hub);
     let lbl = label(id);
     if hub.app.get_webview(&lbl).is_some() {
@@ -252,6 +259,16 @@ fn create_service_now(hub: &Arc<Hub>, id: &'static str) {
         true
     });
     let _ = win.add_child(b, LogicalPosition::new(OFFSCREEN_X, 0.0), LogicalSize::new(800.0, 700.0));
+    // Creating the page can't be done while holding the core lock (it waits for the main thread), so a sign-out or turning the
+    // service off can still slip in during it. Ask again now: if the page is no longer wanted, close it straight away, so such a
+    // race leaves nothing behind.
+    if !hub.core.lock().unwrap().confirm_load(id, background) {
+        if let Some(wv) = hub.app.get_webview(&label(id)) {
+            let _ = wv.close();
+        }
+        hub.emit_state();
+        layout(hub);
+    }
 }
 
 fn unique_download_path(name: &str) -> PathBuf {
@@ -267,9 +284,14 @@ fn unique_download_path(name: &str) -> PathBuf {
     dest
 }
 
-pub fn close_service(hub: &Arc<Hub>, id: &str) {
+/// Closes a service's page. Unless `force`, the close is skipped if the service has been wanted loaded again since the decision
+/// to close it (see `Core::close_wanted`); `force` is for replacing a page that failed to load, which must really go.
+pub fn close_service(hub: &Arc<Hub>, id: &str, force: bool) {
     let id = id.to_string();
     on_ui(hub, "close service", move |h| {
+        if !h.core.lock().unwrap().close_wanted(&id, force) {
+            return;
+        }
         if let Some(wv) = h.app.get_webview(&label(&id)) {
             let _ = wv.close();
         }

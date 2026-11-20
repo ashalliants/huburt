@@ -79,8 +79,10 @@ pub trait Poller: Send {
     fn reset(&mut self) {}
     /// A banner button was pressed ("reply", "markRead"); true if it worked.
     fn perform(&mut self, _action: &str, _info: &HashMap<String, String>, _text: Option<&str>) -> bool { false }
-    /// Slack only: tell the service you're active ("show as online"). False if it couldn't be sent yet.
-    fn keep_online(&mut self) -> bool { false }
+    /// Slack only: tell the service you're active ("show as online"). False if it couldn't be sent yet, or was called off.
+    /// `keep_going` is asked before each request it makes (a ping is several requests); once it says no, it stops and returns
+    /// false. A request already in flight can't be taken back, so that is the limit of how late it can be cancelled.
+    fn keep_online(&mut self, _keep_going: &dyn Fn() -> bool) -> bool { false }
     /// Per-service options (Gmail: "source" = "important" | "all").
     fn set_option(&mut self, _key: &str, _value: &str) {}
 }
