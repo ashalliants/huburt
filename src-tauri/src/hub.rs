@@ -108,7 +108,11 @@ pub enum Action {
     /// Load a page for background work (a sync wake, looking for credentials, keeping Slack online). Re-checked when it runs:
     /// if the service has been found signed out since it was queued, it does nothing.
     LoadBackground(&'static str),
+    /// Unload a page that nobody is looking at. Re-checked when it runs: if you have opened the service since it was queued,
+    /// it does nothing.
     Unload(&'static str),
+    /// Unload regardless (only for reloading a page that failed to load, which may well be the one you are looking at).
+    UnloadNow(&'static str),
     /// Destroy the page's web view without any of the unload bookkeeping.
     Close(&'static str),
     Probe(&'static str, &'static str, String),
@@ -354,6 +358,21 @@ impl Core {
         acts.push(Action::State);   // the sidebar shows the "!" from this
     }
 
+    /// Decides, and records, that a service's page is being unloaded. Unless `force`, a service you are looking at (or have
+    /// opened since the unload was queued) is left alone, decided under the core lock together with the change itself.
+    pub fn begin_unload(&mut self, id: &'static str, force: bool) -> bool {
+        if !force && self.is_visible(id) { return false; }
+        let Some(s) = self.svcs.get_mut(id) else { return false };
+        let was = s.loaded;
+        s.loaded = false;
+        s.ready = false;
+        s.idle_deadline = None;
+        s.wake_deadline = None;
+        s.wake_session = false;
+        s.cred_wake = false;
+        was
+    }
+
     /// Decides, and records, that a service's page is about to be loaded. Everything happens under the core lock, so it can't
     /// interleave with a sign-out: a *background* load of a signed-out service never goes ahead (opening it yourself does).
     pub fn begin_load(&mut self, id: &'static str, background: bool) -> bool {
@@ -371,8 +390,9 @@ impl Core {
     /// Checked again on the UI thread just before a page is created (see `begin_load`, which approved it earlier): a background
     /// load of a service that has been found signed out or turned off since is called off, and its "loading" state undone.
     pub fn confirm_load(&mut self, id: &'static str, background: bool) -> bool {
+        let visible = self.is_visible(id);   // opened by you since it was approved: that is a foreground load now
         let Some(s) = self.svcs.get_mut(id) else { return false };
-        if s.enabled && s.loaded && !(background && s.signed_out) { return true; }
+        if s.enabled && s.loaded && !(background && s.signed_out && !visible) { return true; }
         if s.loaded {
             s.loaded = false;
             s.ready = false;
@@ -506,7 +526,7 @@ impl Core {
                 s.ready = false;
                 s.page_finished = false;
                 s.load_started = now;
-                acts.push(Action::Unload(id));
+                acts.push(Action::UnloadNow(id));
                 acts.push(if visible { Action::Load(id) } else { Action::LoadBackground(id) });
             }
         }
@@ -734,6 +754,7 @@ impl Hub {
                 Action::Load(id) => self.load(id),
                 Action::LoadBackground(id) => self.load_background(id),
                 Action::Unload(id) => self.unload(id),
+                Action::UnloadNow(id) => self.unload_inner(id, true),
                 Action::Close(id) => webviews::close_service(self, id),
                 Action::Layout => webviews::layout(self),
                 Action::State => self.emit_state(),
@@ -764,18 +785,10 @@ impl Hub {
         }
     }
 
-    pub fn unload(self: &Arc<Self>, id: &'static str) {
-        let was = self.with(|c, _| {
-            let Some(s) = c.svcs.get_mut(id) else { return false };
-            let was = s.loaded;
-            s.loaded = false;
-            s.ready = false;
-            s.idle_deadline = None;
-            s.wake_deadline = None;
-            s.wake_session = false;
-            s.cred_wake = false;
-            was
-        });
+    pub fn unload(self: &Arc<Self>, id: &'static str) { self.unload_inner(id, false); }
+
+    fn unload_inner(self: &Arc<Self>, id: &'static str, force: bool) {
+        let was = self.with(|c, _| c.begin_unload(id, force));
         if was {
             webviews::close_service(self, id);
             crate::log(&format!("{id} unloaded"));
@@ -1183,7 +1196,7 @@ mod tests {
 
     fn core() -> Core { Core::new(Settings::default(), Duration::from_millis(50)) }
     fn has_load(acts: &[Action], id: &str) -> bool { acts.iter().any(|a| matches!(a, Action::Load(i) | Action::LoadBackground(i) if *i == id)) }
-    fn has_unload(acts: &[Action], id: &str) -> bool { acts.iter().any(|a| matches!(a, Action::Unload(i) if *i == id)) }
+    fn has_unload(acts: &[Action], id: &str) -> bool { acts.iter().any(|a| matches!(a, Action::Unload(i) | Action::UnloadNow(i) if *i == id)) }
 
     #[test]
     fn selecting_a_service_loads_it_and_leaving_unloads_it_after_the_idle_time() {
@@ -1420,6 +1433,34 @@ mod tests {
         let mut acts = vec![];
         c.set_signed_out("whatsapp", true, &mut acts);
         assert!(!acts.iter().any(|a| matches!(a, Action::Unload(_))), "never unloaded under you");
+    }
+
+    #[test]
+    fn a_queued_unload_never_closes_a_page_you_opened_in_the_meantime() {
+        let mut c = core();
+        c.svcs.get_mut("whatsapp").unwrap().loaded = true;
+        // the unload was queued while nobody was looking; then you opened the service before it ran
+        c.window_visible = true;
+        c.selected = "whatsapp".into();
+        assert!(!c.begin_unload("whatsapp", false), "the unload is called off");
+        assert!(c.svcs["whatsapp"].loaded, "and the page stays");
+        // when nobody is looking it goes ahead, and a forced unload (reloading a failed page) always does
+        c.selected = "gmail".into();
+        assert!(c.begin_unload("whatsapp", false));
+        c.svcs.get_mut("gmail").unwrap().loaded = true;
+        c.selected = "gmail".into();
+        assert!(c.begin_unload("gmail", true));
+    }
+
+    #[test]
+    fn a_background_load_you_selected_the_service_for_is_not_cancelled_by_a_sign_out() {
+        let mut c = core();
+        assert!(c.begin_load("whatsapp", true));   // approved as background work
+        c.set_signed_out("whatsapp", true, &mut vec![]);
+        c.window_visible = true;
+        c.selected = "whatsapp".into();   // then you opened it to sign in
+        assert!(c.confirm_load("whatsapp", true), "it is a foreground load now");
+        assert!(c.svcs["whatsapp"].loaded);
     }
 
     #[test]
