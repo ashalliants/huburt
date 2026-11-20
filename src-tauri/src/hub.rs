@@ -103,7 +103,11 @@ pub struct Core {
 }
 
 pub enum Action {
+    /// Load a service's page because it is being looked at, or explicitly asked for (always allowed).
     Load(&'static str),
+    /// Load a page for background work (a sync wake, looking for credentials, keeping Slack online). Re-checked when it runs:
+    /// if the service has been found signed out since it was queued, it does nothing.
+    LoadBackground(&'static str),
     Unload(&'static str),
     /// Destroy the page's web view without any of the unload bookkeeping.
     Close(&'static str),
@@ -324,6 +328,12 @@ impl Core {
         let Some(s) = self.svcs.get_mut(id) else { return };
         if s.signed_out == v { return; }
         s.signed_out = v;
+        if !v && s.def.sleep_cycle.is_some() {
+            // Signed in: the first background sync is a full interval away. (A restart that saved the signed-out state never
+            // did the quick first look, and while the page was open the scheduler didn't get to mark it as done.)
+            s.did_first_wake = true;
+            s.next_wake = None;
+        }
         Self::remember_signed_out(&mut self.settings, id, v);
         acts.push(Action::Save);
         crate::log(&format!("{id} {}", if v { "signed out" } else { "signed in again" }));
@@ -336,6 +346,25 @@ impl Core {
         }
         acts.push(Action::Banner);
         acts.push(Action::State);   // the sidebar shows the "!" from this
+    }
+
+    /// Decides, and records, that a service's page is about to be loaded. Everything happens under the core lock, so it can't
+    /// interleave with a sign-out: a *background* load of a signed-out service never goes ahead (opening it yourself does).
+    pub fn begin_load(&mut self, id: &'static str, background: bool) -> bool {
+        let Some(s) = self.svcs.get_mut(id) else { return false };
+        if !s.enabled || s.loaded || (background && s.signed_out) { return false; }
+        s.loaded = true;
+        s.ready = false;
+        s.page_finished = false;
+        s.error = None;
+        s.error_since = None;
+        s.load_started = Instant::now();
+        true
+    }
+
+    /// The poller to send a "show as online" ping through, only if there is still something to keep online.
+    pub fn presence_poller(&self, id: &str) -> Option<PollerHandle> {
+        self.svcs.get(id).filter(|s| s.enabled && !s.signed_out).and_then(|s| s.poller.clone())
     }
 
     /// Turns a service on or off. Off means nothing is loaded and nothing is checked in the background; the login is kept.
@@ -460,7 +489,7 @@ impl Core {
                 s.page_finished = false;
                 s.load_started = now;
                 acts.push(Action::Unload(id));
-                acts.push(Action::Load(id));
+                acts.push(if visible { Action::Load(id) } else { Action::LoadBackground(id) });
             }
         }
 
@@ -484,7 +513,7 @@ impl Core {
                     s.cred_tries = 0;
                     s.next_cred_check = now + Duration::from_secs(2);
                     crate::log(&format!("{id} loading once to pick up credentials"));
-                    acts.push(Action::Load(id));
+                    acts.push(Action::LoadBackground(id));
                 }
             } else if (!s.loaded || s.def.poll_while_loaded) && !s.poll_inflight && now >= s.next_poll && !s.needs_credentials() {
                 s.next_poll = now + Duration::from_secs(s.def.poll_interval);
@@ -527,7 +556,7 @@ impl Core {
                     s.wake_started = now;
                     s.next_ready_probe = now + Duration::from_secs(2);
                     crate::log(&format!("{id} waking for background sync"));
-                    acts.push(Action::Load(id));
+                    acts.push(Action::LoadBackground(id));
                     let awake = env_secs("HUB_WAKE_AWAKE", c.awake_for);
                     s.wake_deadline = Some(now + awake);
                 }
@@ -578,7 +607,7 @@ impl Core {
         if on {
             if !s.keeping_online { s.keeping_online = true; crate::log("slack staying online: on"); }
             s.idle_deadline = None;
-            if !s.loaded { acts.push(Action::Load("slack")); }
+            if !s.loaded { acts.push(Action::LoadBackground("slack")); }
             let due = s.last_presence_ping.map(|t| now.duration_since(t) >= Duration::from_secs(240)).unwrap_or(true);
             if due && s.loaded { acts.push(Action::Presence("slack")); }
         } else if s.keeping_online {
@@ -675,6 +704,7 @@ impl Hub {
         for a in acts {
             match a {
                 Action::Load(id) => self.load(id),
+                Action::LoadBackground(id) => self.load_background(id),
                 Action::Unload(id) => self.unload(id),
                 Action::Close(id) => webviews::close_service(self, id),
                 Action::Layout => webviews::layout(self),
@@ -692,18 +722,14 @@ impl Hub {
 
     // MARK: load / unload
 
-    pub fn load(self: &Arc<Self>, id: &'static str) {
-        let go = self.with(|c, _| {
-            let Some(s) = c.svcs.get_mut(id) else { return false };
-            if !s.enabled || s.loaded { return false; }
-            s.loaded = true;
-            s.ready = false;
-            s.page_finished = false;
-            s.error = None;
-            s.error_since = None;
-            s.load_started = Instant::now();
-            true
-        });
+    /// Loads a page because it is being looked at or was explicitly asked for.
+    pub fn load(self: &Arc<Self>, id: &'static str) { self.load_inner(id, false); }
+
+    /// Loads a page for background work; does nothing if the service is signed out by the time this runs.
+    fn load_background(self: &Arc<Self>, id: &'static str) { self.load_inner(id, true); }
+
+    fn load_inner(self: &Arc<Self>, id: &'static str, background: bool) {
+        let go = self.with(|c, _| c.begin_load(id, background));
         if go {
             webviews::create_service(self, id);
             self.with(|_, a| { a.push(Action::Layout); a.push(Action::State); });
@@ -776,7 +802,7 @@ impl Hub {
     }
 
     fn spawn_presence(self: &Arc<Self>, id: &'static str) {
-        let Some(poller) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone()) else { return };
+        let Some(poller) = self.core.lock().unwrap().presence_poller(id) else { return };
         let hub = self.clone();
         poller.keep_online(move |sent| {
             if sent {
@@ -1123,7 +1149,7 @@ mod tests {
     use super::*;
 
     fn core() -> Core { Core::new(Settings::default(), Duration::from_millis(50)) }
-    fn has_load(acts: &[Action], id: &str) -> bool { acts.iter().any(|a| matches!(a, Action::Load(i) if *i == id)) }
+    fn has_load(acts: &[Action], id: &str) -> bool { acts.iter().any(|a| matches!(a, Action::Load(i) | Action::LoadBackground(i) if *i == id)) }
     fn has_unload(acts: &[Action], id: &str) -> bool { acts.iter().any(|a| matches!(a, Action::Unload(i) if *i == id)) }
 
     #[test]
@@ -1286,6 +1312,53 @@ mod tests {
         let mut acts = vec![];
         c.set_signed_out("whatsapp", false, &mut acts);
         assert!(!c.svcs["whatsapp"].signed_out && c.settings.signed_out.is_empty());
+    }
+
+    #[test]
+    fn a_background_load_queued_before_a_sign_out_does_nothing_but_opening_it_still_loads() {
+        let mut c = core();
+        c.set_signed_out("whatsapp", true, &mut vec![]);   // found signed out after the load was queued
+        assert!(!c.begin_load("whatsapp", true), "a stale background load must not go ahead");
+        assert!(!c.svcs["whatsapp"].loaded);
+        assert!(c.begin_load("whatsapp", false), "opening it yourself always loads it");
+        assert!(c.svcs["whatsapp"].loaded);
+        // signed in services still do background work as usual, and turned-off ones never load
+        assert!(c.begin_load("gmail", true));
+        c.svcs.get_mut("slack").unwrap().enabled = false;
+        assert!(!c.begin_load("slack", false));
+    }
+
+    #[test]
+    fn presence_pings_only_go_to_an_enabled_signed_in_slack() {
+        let mut c = core();
+        let (poller, _calls) = test_poller(Duration::ZERO);
+        c.svcs.get_mut("slack").unwrap().poller = Some(poller);
+        assert!(c.presence_poller("slack").is_some());
+        c.svcs.get_mut("slack").unwrap().signed_out = true;
+        assert!(c.presence_poller("slack").is_none(), "nothing to keep online when signed out");
+        c.svcs.get_mut("slack").unwrap().signed_out = false;
+        c.svcs.get_mut("slack").unwrap().enabled = false;
+        assert!(c.presence_poller("slack").is_none());
+    }
+
+    #[test]
+    fn signing_in_while_the_page_is_open_never_triggers_the_quick_first_wake() {
+        // After a restart the signed-out state came from the settings, and you opened WhatsApp straight away: the page is
+        // loaded, so the scheduler never got to mark the quick first look as done. Signing in must do that itself.
+        let mut c = Core::new(Settings { signed_out: vec!["whatsapp".into()], ..Default::default() }, Duration::from_secs(300));
+        assert!(!c.svcs["whatsapp"].did_first_wake);
+        c.svcs.get_mut("whatsapp").unwrap().loaded = true;
+        c.set_signed_out("whatsapp", false, &mut vec![]);
+        c.svcs.get_mut("whatsapp").unwrap().loaded = false;   // later the page unloads
+        let t0 = Instant::now();
+        for secs in [0u64, 10, 60, 200] {
+            let mut acts = vec![];
+            c.tick_service("whatsapp", t0 + Duration::from_secs(secs), &mut acts);
+            assert!(!has_load(&acts, "whatsapp"), "no wake {secs}s after unloading");
+        }
+        let mut acts = vec![];
+        c.tick_service("whatsapp", t0 + Duration::from_secs(6 * 60), &mut acts);
+        assert!(has_load(&acts, "whatsapp"), "the normal cycle then takes over");
     }
 
     #[test]
