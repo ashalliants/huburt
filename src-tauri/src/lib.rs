@@ -7,6 +7,7 @@ mod http;
 mod hub;
 mod menus;
 mod native;
+mod poller_actor;
 mod pollers;
 mod services;
 mod settings;

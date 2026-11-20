@@ -66,7 +66,10 @@ was doing, so a freeze leaves evidence.
 **Locking rule.** `hub.rs` mutates its state under one lock, collects `Action`s, releases the lock, then performs them (web
 view calls, HTTP). Nothing that can block on the main thread runs while the lock is held, and the core never waits for a poller either: a poller
 is locked for the whole of a network request, so what the core needs to know about one (does it still need credentials?) is
-cached in the service's state and updated by the worker that talks to it.
+reported back by the poller after each operation. Each poller lives on its own thread (`poller_actor.rs`) and is driven by
+messages that are handled strictly in the order they were sent: sending never blocks, "reset, then poll" and "hand over
+credentials, then poll" can't be reordered, and the state each operation reports arrives in that same order, so a stale
+report can never overwrite a newer one.
 
 ### Source layout
 
@@ -76,6 +79,7 @@ cached in the service's state and updated by the worker that talks to it.
 | `src-tauri/src/main.rs` | The launcher. macOS: loads the core library. Elsewhere: just runs the app. |
 | `hub.rs` | Per-service state, the scheduler, muting/pausing, Slack presence, the daily greeting. |
 | `slack.rs`, `gmail.rs`, `http.rs`, `pollers.rs` | The unread pollers and their HTTP layer. |
+| `poller_actor.rs` | Runs each poller on its own thread, driven by ordered, non-blocking messages. |
 | `webviews.rs` | The window, the sidebar and cover web views, the per-service web views, links, downloads, cookies. All of it runs on the UI thread. |
 | `ui_thread.rs` | The dedicated thread that every window and web view operation is posted to (see Threads above). |
 | `services.rs` | The service list, link rules, and the JavaScript injected into pages. |

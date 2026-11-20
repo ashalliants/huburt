@@ -5,7 +5,7 @@
 //! Locking rule: mutate `Core` under the lock, collect `Action`s, release the lock, then run the actions. Nothing that
 //! can block on the main thread (webview calls, HTTP) ever runs while the lock is held.
 use crate::{
-    native, pollers,
+    native, poller_actor::{PollerHandle, Report}, pollers,
     services::{self, Service, SERVICES},
     settings::Settings,
     types::*,
@@ -32,8 +32,6 @@ fn now_unix() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
-pub type Poll = Arc<Mutex<Box<dyn Poller>>>;
-
 pub struct Svc {
     pub def: &'static Service,
     pub enabled: bool,
@@ -49,12 +47,18 @@ pub struct Svc {
     pub quiet: u32,
     pub signed_out: bool,
     pub last_checked: Option<Instant>,
-    pub poller: Option<Poll>,
-    /// The poller still needs cookies / a token from the page. Cached here, because a poller is locked for the whole of a
-    /// network request and the core must never wait for that.
+    /// This service has an unread poller (Slack, Gmail).
+    pub has_poller: bool,
+    /// The poller before its thread is started (set up in `Svc::new`; `Hub::new` starts the thread and takes it).
+    pub pending_poller: Option<Box<dyn Poller>>,
+    /// The running poller. Every operation on it is a non-blocking message handled in order (see `poller_actor.rs`), so the
+    /// core never waits for it, and nothing can reorder "reset" and the next "poll".
+    pub poller: Option<PollerHandle>,
+    /// The poller still needs cookies / a token from the page. Updated only from the poller's own reports, in order.
     pub needs_creds: bool,
-    /// What the poller reads out of the page (a fixed property of the poller, cached for the same reason).
+    /// What the poller reads out of the page (a fixed property of the poller).
     pub harvest_js: Option<&'static str>,
+    /// A poll has been requested and its report hasn't come back yet.
     pub poll_inflight: bool,
     pub poller_healthy: bool,
     pub next_poll: Instant,
@@ -111,9 +115,6 @@ pub enum Action {
     State,
     /// The menu bar icon and hover summary need refreshing.
     Banner,
-    /// Change a poller (its options, or forget what it has seen) on a worker thread: a poller is locked for the whole of a
-    /// network request, so this must never happen while the core lock is held.
-    Poller { id: &'static str, option: Option<(&'static str, String)>, reset: bool },
 }
 
 pub struct Hub {
@@ -181,7 +182,9 @@ impl Svc {
             last_checked: None,
             needs_creds: poller.as_ref().map(|p| p.needs_credentials()).unwrap_or(false),
             harvest_js: poller.as_ref().and_then(|p| p.harvest_js()),
-            poller: poller.map(|p| Arc::new(Mutex::new(p))),
+            has_poller: poller.is_some(),
+            pending_poller: poller,
+            poller: None,
             poll_inflight: false,
             poller_healthy: false,
             next_poll: now,
@@ -207,7 +210,7 @@ impl Svc {
             last_presence_ping: None,
         }
     }
-    fn lazy(&self) -> bool { self.def.lazy && (self.poller.is_some() || self.def.sleep_cycle.is_some()) }
+    fn lazy(&self) -> bool { self.def.lazy && (self.has_poller || self.def.sleep_cycle.is_some()) }
     fn needs_credentials(&self) -> bool { self.needs_creds }
     fn waking(&self) -> bool { self.loaded && !self.ready && self.error.is_none() }
 }
@@ -330,7 +333,8 @@ impl Core {
         if s.enabled == on { return; }
         s.enabled = on;
         if on {
-            if s.poller.is_some() { a.push(Action::Poller { id: def.id, option: None, reset: true }); }
+            // sent while the core lock is held, so no later poll can start before it (they're handled in order)
+            if let Some(p) = &s.poller { p.reset(); }
             s.did_first_wake = false; s.primed_wake = false; s.next_poll = Instant::now(); s.next_wake = None;
             self.settings.disabled.retain(|d| d != def.id);
         } else {
@@ -338,7 +342,7 @@ impl Core {
             s.loaded = false; s.ready = false;
             s.idle_deadline = None; s.wake_session = false; s.cred_wake = false; s.unread = 0; s.quiet = 0;
             s.last_checked = None; s.error = None; s.signed_out = false; s.keeping_online = false;
-            if s.poller.is_some() { a.push(Action::Poller { id: def.id, option: None, reset: true }); }
+            if let Some(p) = &s.poller { p.reset(); }
             self.settings.disabled.push(def.id.to_string());
             if sel == def.id {
                 if let Some(next) = self.enabled_ids().first() { self.selected = next.to_string(); }
@@ -423,7 +427,7 @@ impl Core {
         }
 
         // Polling: while asleep, or all the time for services whose poller is the source of truth
-        if s.poller.is_some() {
+        if s.has_poller {
             if !s.loaded && s.needs_credentials() {
                 // Signed out: don't reload the page every poll just to look for a login that isn't there
                 let recently = s.last_cred_wake.map(|t| now.duration_since(t) < Duration::from_secs(600)).unwrap_or(false);
@@ -543,13 +547,15 @@ pub fn day_key() -> String { chrono::Local::now().format("%Y-%m-%d").to_string()
 
 impl Hub {
     pub fn new(app: AppHandle) -> Arc<Hub> {
-        Arc::new(Hub {
+        let hub = Arc::new(Hub {
             app,
             core: Mutex::new(Core::new(Settings::load(), env_secs("HUB_IDLE_SECONDS", 300))),
             ui: UiThread::start(),
             layout_pending: AtomicBool::new(false),
             watchdog: Watchdog { started: Instant::now(), ping_inflight: AtomicBool::new(false), ping_sent_ms: AtomicU64::new(0), stalled: AtomicBool::new(false) },
-        })
+        });
+        hub.attach_pollers();
+        hub
     }
 
     /// Starts the scheduler thread.
@@ -617,7 +623,6 @@ impl Hub {
                 Action::Layout => webviews::layout(self),
                 Action::State => self.emit_state(),
                 Action::Banner => self.update_tray(),
-                Action::Poller { id, option, reset } => self.configure_poller(id, option, reset),
                 Action::Probe(id, kind, js) => webviews::eval(self, id, &services::probe_js(id, kind, &js)),
                 Action::Poll(id) => self.spawn_poll(id),
                 Action::Presence(id) => self.spawn_presence(id),
@@ -669,23 +674,40 @@ impl Hub {
     // MARK: polling
 
     fn spawn_poll(self: &Arc<Self>, id: &'static str) {
-        let Some((poll, loaded)) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone().map(|p| (p, s.loaded))) else { return };
+        let Some((poller, loaded)) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone().map(|p| (p, s.loaded))) else { return };
+        if !loaded {
+            poller.poll();   // the answer comes back as a report, see `poller_report`
+            return;
+        }
+        // While the page is open its cookies are readable: use the freshest ones (the services rotate them). Reading them
+        // waits for the main thread, so it happens on a worker thread; the poller's own thread does the network work.
         let hub = self.clone();
         std::thread::spawn(move || {
-            // While the page is open its cookies are readable: use the freshest ones (the services rotate them)
-            if loaded {
-                let cookies = webviews::cookies(&hub, id);
-                if !cookies.is_empty() {
-                    poll.lock().unwrap().set_credentials(Credentials { cookies, page_data: None });
-                }
+            let cookies = webviews::cookies(&hub, id);
+            if !cookies.is_empty() {
+                poller.credentials(Credentials { cookies, page_data: None });
             }
-            let (res, signed_out, needs) = {
-                let mut p = poll.lock().unwrap();
-                let r = p.poll();
-                (r, p.signed_out(), p.needs_credentials())
-            };
-            hub.poll_done(id, res, signed_out, needs);
+            poller.poll();
         });
+    }
+
+    /// What a poller reported after an operation. They arrive in the order the operations were sent.
+    fn poller_report(self: &Arc<Self>, id: &'static str, report: Report) {
+        match report {
+            Report::Polled { result, signed_out, needs_creds } => self.poll_done(id, result, signed_out, needs_creds),
+            Report::Credentials { needs_creds } => self.with(|c, _| { if let Some(s) = c.svcs.get_mut(id) { s.needs_creds = needs_creds; } }),
+        }
+    }
+
+    /// Starts each poller's thread. Called once, right after the `Hub` exists (the threads report back to it).
+    fn attach_pollers(self: &Arc<Self>) {
+        let mut c = self.core.lock().unwrap();
+        for s in c.svcs.values_mut() {
+            if let Some(poller) = s.pending_poller.take() {
+                let hub = self.clone();
+                s.poller = Some(PollerHandle::spawn(s.def.id, poller, move |id, report| hub.poller_report(id, report)));
+            }
+        }
     }
 
     fn poll_done(self: &Arc<Self>, id: &'static str, result: Option<PollResult>, signed_out: bool, needs_creds: bool) {
@@ -722,30 +744,10 @@ impl Hub {
         }
     }
 
-    /// Hands a poller its credentials and records whether it still needs more. Worker threads only: it waits for the poller.
-    fn give_credentials(self: &Arc<Self>, id: &'static str, poll: Poll, creds: Credentials) {
-        let needs = {
-            let mut p = poll.lock().unwrap();
-            p.set_credentials(creds);
-            p.needs_credentials()
-        };
-        self.with(|c, _| { if let Some(s) = c.svcs.get_mut(id) { s.needs_creds = needs; } });
-    }
-
-    fn configure_poller(self: &Arc<Self>, id: &'static str, option: Option<(&'static str, String)>, reset: bool) {
-        let Some(poll) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone()) else { return };
-        std::thread::spawn(move || {
-            let mut p = poll.lock().unwrap();
-            if let Some((key, value)) = option { p.set_option(key, &value); }
-            if reset { p.reset(); }
-        });
-    }
-
     fn spawn_presence(self: &Arc<Self>, id: &'static str) {
-        let Some(poll) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone()) else { return };
+        let Some(poller) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone()) else { return };
         let hub = self.clone();
-        std::thread::spawn(move || {
-            let sent = poll.lock().unwrap().keep_online();
+        poller.keep_online(move |sent| {
             if sent {
                 hub.with(|c, _| { if let Some(s) = c.svcs.get_mut(id) { s.last_presence_ping = Some(Instant::now()); } });
             }
@@ -757,23 +759,22 @@ impl Hub {
         let (has_poller, js) = {
             let c = self.core.lock().unwrap();
             let Some(s) = c.svcs.get(id) else { return };
-            (s.poller.is_some(), s.harvest_js)
+            (s.has_poller, s.harvest_js)
         };
         if !has_poller { return; }
         let hub = self.clone();
         std::thread::spawn(move || {
-            let cookies = webviews::cookies(&hub, id);
-            let creds_now = js.is_none();
-            let poll = hub.with(|c, _| {
+            let cookies = webviews::cookies(&hub, id);   // waits for the main thread, so on a worker thread
+            let poller = hub.with(|c, _| {
                 let s = c.svcs.get_mut(id)?;
                 if !cookies.is_empty() { s.cookies = cookies.clone(); }
                 crate::log(&format!("{id}: picked up {} cookies from the page", cookies.len()));
                 s.poller.clone()
             });
-            if creds_now {
-                if let Some(p) = poll { hub.give_credentials(id, p, Credentials { cookies, page_data: None }); }
-            } else if let Some(js) = js {
-                webviews::eval(&hub, id, &services::probe_js(id, "harvest", js));
+            match (js, poller) {
+                (None, Some(p)) => p.credentials(Credentials { cookies, page_data: None }),
+                (Some(js), _) => webviews::eval(&hub, id, &services::probe_js(id, "harvest", js)),
+                _ => {}
             }
         });
     }
@@ -843,15 +844,12 @@ impl Hub {
             }
             "harvest" => {
                 let page_data = value.as_str().map(|s| s.to_string());
-                let (poll, cookies) = {
+                let (poller, cookies) = {
                     let c = self.core.lock().unwrap();
                     match c.svcs.get(id) { Some(s) => (s.poller.clone(), s.cookies.clone()), None => return }
                 };
-                // this runs on the main thread (a command), which must never wait for a poller that is busy on the network
-                if let Some(p) = poll {
-                    let hub = self.clone();
-                    std::thread::spawn(move || hub.give_credentials(id, p, Credentials { cookies, page_data }));
-                }
+                // sending is a non-blocking message, so this is safe on the main thread (this is a command)
+                if let Some(p) = poller { p.credentials(Credentials { cookies, page_data }); }
             }
             "test" => crate::log(&format!("{id} page bridge ok: {value}")),
             _ => {}
@@ -980,7 +978,7 @@ impl Hub {
             c.settings.gmail_source = source.to_string();
             c.settings.save();
             if let Some(s) = c.svcs.get_mut("gmail") {
-                if s.poller.is_some() { a.push(Action::Poller { id: "gmail", option: Some(("source", source.to_string())), reset: true }); }
+                if let Some(p) = &s.poller { p.set_option("source", source); p.reset(); }   // in order, before the poll below
                 s.next_poll = Instant::now();   // re-read the count straight away
             }
             crate::log(&format!("gmail count source: {source}"));
@@ -1002,13 +1000,13 @@ impl Hub {
     pub fn handle_action(self: &Arc<Self>, action: String, info: HashMap<String, String>, text: Option<String>) {
         let Some(id) = info.get("service").cloned() else { return };
         let Some(def) = services::service(&id) else { return };
-        let poll = self.core.lock().unwrap().svcs.get(def.id).and_then(|s| s.poller.clone());
+        let Some(poller) = self.core.lock().unwrap().svcs.get(def.id).and_then(|s| s.poller.clone()) else { return };
         let hub = self.clone();
-        std::thread::spawn(move || {
-            let ok = poll.map(|p| p.lock().unwrap().perform(&action, &info, text.as_deref())).unwrap_or(false);
-            crate::log(&format!("{id} banner action {action}: {}", if ok { "done" } else { "failed" }));
+        let performed = action.clone();
+        poller.perform(action, info, text, move |ok| {
+            crate::log(&format!("{id} banner action {performed}: {}", if ok { "done" } else { "failed" }));
             if !ok {
-                let failure = if action == "reply" { "Couldn't send your reply" } else { "Couldn't mark it as read" };
+                let failure = if performed == "reply" { "Couldn't send your reply" } else { "Couldn't mark it as read" };
                 hub.notify(def, NotificationItem { title: failure.into(), body: format!("Open {} in Hub to do it there.", def.name), ..Default::default() });
             } else {
                 hub.with(|c, _| { if let Some(s) = c.svcs.get_mut(def.id) { s.next_poll = Instant::now(); } });
@@ -1299,31 +1297,38 @@ mod tests {
     }
 
 
-    /// A poller that does nothing, standing in for one that is busy.
-    struct IdlePoller;
-    impl Poller for IdlePoller {
-        fn poll(&mut self) -> Option<PollResult> { None }
+    /// Records what it is asked to do and can be made slow, standing in for a poller busy on the network.
+    struct TestPoller {
+        calls: Arc<Mutex<Vec<String>>>,
+        poll_takes: Duration,
+    }
+    impl Poller for TestPoller {
+        fn poll(&mut self) -> Option<PollResult> {
+            std::thread::sleep(self.poll_takes);
+            self.calls.lock().unwrap().push("poll".into());
+            None
+        }
         fn needs_credentials(&self) -> bool { false }
         fn signed_out(&self) -> bool { false }
         fn set_credentials(&mut self, _: Credentials) {}
+        fn reset(&mut self) { self.calls.lock().unwrap().push("reset".into()); }
+    }
+
+    fn test_poller(poll_takes: Duration) -> (PollerHandle, Arc<Mutex<Vec<String>>>) {
+        let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+        let handle = PollerHandle::spawn("test", Box::new(TestPoller { calls: calls.clone(), poll_takes }), |_, _| {});
+        (handle, calls)
     }
 
     #[test]
     fn a_poller_busy_on_the_network_never_blocks_the_core() {
-        // A poller is locked for the whole of a network request. Everything the app's main thread does goes through the core,
-        // so if the core ever waited for a poller, a slow request would freeze every click and menu.
+        // A poll can take many seconds. Everything the app's main thread does goes through the core, so if the core ever
+        // waited for a busy poller, a slow request would freeze every click and menu.
         let mut c = core();
-        let poll: Poll = Arc::new(Mutex::new(Box::new(IdlePoller)));
-        c.svcs.get_mut("slack").unwrap().poller = Some(poll.clone());
+        let (poller, calls) = test_poller(Duration::from_secs(4));
+        c.svcs.get_mut("slack").unwrap().poller = Some(poller.clone());
         c.svcs.get_mut("slack").unwrap().needs_creds = false;
-
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            let _busy = poll.lock().unwrap();
-            locked_tx.send(()).unwrap();
-            std::thread::sleep(Duration::from_secs(4));
-        });
-        locked_rx.recv().unwrap();   // the poller is now locked, as during a slow request
+        poller.poll();   // now busy for 4 seconds
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1334,12 +1339,29 @@ mod tests {
             c.set_enabled(slack, true, &mut acts);
             let _ = c.view();
             c.refresh_visibility(&mut acts);
-            done_tx.send(acts).unwrap();
+            done_tx.send(()).unwrap();
         });
-        let acts = done_rx.recv_timeout(Duration::from_secs(2)).expect("the core waited for a busy poller");
-        // changes to the poller are queued as actions for a worker thread to do, not done under the lock
-        assert!(acts.iter().any(|a| matches!(a, Action::Poller { id: "slack", reset: true, .. })));
-        holder.join().unwrap();
+        done_rx.recv_timeout(Duration::from_secs(2)).expect("the core waited for a busy poller");
+        drop(calls);
+    }
+
+    #[test]
+    fn turning_a_service_back_on_resets_its_poller_before_any_later_poll() {
+        // Re-enabling must forget what was seen before the next poll runs, or existing unread items would be announced as
+        // new. The reset is sent under the core lock, so the poll that follows (which the scheduler can only request after
+        // that) is handled after it.
+        let mut c = core();
+        let (poller, calls) = test_poller(Duration::ZERO);
+        c.svcs.get_mut("gmail").unwrap().poller = Some(poller.clone());
+        let gmail = services::service("gmail").unwrap();
+        let mut acts = vec![];
+        c.set_enabled(gmail, false, &mut acts);
+        c.set_enabled(gmail, true, &mut acts);
+        assert!(c.svcs["gmail"].next_poll <= Instant::now(), "a poll is due straight away");
+        poller.poll();   // what the scheduler does next
+        let until = Instant::now() + Duration::from_secs(3);
+        while calls.lock().unwrap().len() < 3 && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
+        assert_eq!(*calls.lock().unwrap(), vec!["reset", "reset", "poll"]);
     }
 
     #[test]
