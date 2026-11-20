@@ -29,7 +29,9 @@ pub fn log(msg: &str) {
     let path = native::log_path();
     if let Some(dir) = path.parent() { let _ = std::fs::create_dir_all(dir); }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{} {msg}", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
+        // one write per line (append mode keeps it whole), so lines from different threads can't be mixed together
+        let line = format!("{} {msg}\n", chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"));
+        let _ = f.write_all(line.as_bytes());
     }
 }
 
@@ -145,9 +147,10 @@ pub fn run() {
             let first_run = native::is_installed() && {
                 let mut c = hub.core.lock().unwrap();
                 let first = !c.settings.login_item_configured;
-                if first { c.settings.login_item_configured = true; c.settings.save(); }
+                if first { c.settings.login_item_configured = true; }
                 first
             };
+            if first_run { hub.save_settings(); }
             if first_run { native::set_login_item(true); }
             spawn_test_hooks(hub);
             Ok(())

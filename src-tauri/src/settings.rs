@@ -48,12 +48,18 @@ impl Settings {
         std::fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
     }
 
-    pub fn save(&self) {
+    /// Writes the settings. Every save goes through here, one at a time, and `snapshot` is asked for the settings only once this
+    /// call holds the write lock, so whoever writes last writes the newest: two changes made at nearly the same moment can't
+    /// end up with the older one on disk, and two writers never share the temporary file.
+    pub fn save_latest(snapshot: impl FnOnce() -> Settings) {
+        static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _one_at_a_time = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+        let settings = snapshot();
         let path = Self::path();
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        if let Ok(s) = serde_json::to_string_pretty(self) {
+        if let Ok(s) = serde_json::to_string_pretty(&settings) {
             let tmp = path.with_extension("json.tmp");
             if std::fs::write(&tmp, s).is_ok() {
                 let _ = std::fs::rename(tmp, path);
@@ -82,6 +88,28 @@ mod tests {
     fn order_keeps_saved_then_adds_missing() {
         let s = Settings { order: vec!["gmail".into(), "bogus".into(), "slack".into()], ..Default::default() };
         assert_eq!(s.resolved_order(&["slack", "whatsapp", "gmail"]), vec!["gmail", "slack", "whatsapp"]);
+    }
+
+    #[test]
+    fn simultaneous_saves_never_lose_a_change() {
+        // Eight threads each record a different signed-out service and save at the same moment. Whatever order they run in, the
+        // file must end up with all eight: the last writer always writes the newest settings.
+        let dir = std::env::temp_dir().join(format!("huburt-settings-race-{}", std::process::id()));
+        std::env::set_var("HUB_SETTINGS_DIR", &dir);
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(Settings::default()));
+        let threads: Vec<_> = (0..8)
+            .map(|i| {
+                let shared = shared.clone();
+                std::thread::spawn(move || {
+                    shared.lock().unwrap().signed_out.push(format!("service-{i}"));
+                    Settings::save_latest(|| shared.lock().unwrap().clone());
+                })
+            })
+            .collect();
+        for t in threads { t.join().unwrap(); }
+        let on_disk = Settings::load();
+        assert_eq!(on_disk.signed_out.len(), 8, "{:?}", on_disk.signed_out);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

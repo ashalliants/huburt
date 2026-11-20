@@ -190,10 +190,17 @@ fn link_guard_js(def: &services::Service) -> String {
     )
 }
 
-pub fn create_service(hub: &Arc<Hub>, id: &'static str) { on_ui(hub, "create service", move |h| create_service_now(h, id)); }
+pub fn create_service(hub: &Arc<Hub>, id: &'static str, background: bool) { on_ui(hub, "create service", move |h| create_service_now(h, id, background)); }
 
-fn create_service_now(hub: &Arc<Hub>, id: &'static str) {
+fn create_service_now(hub: &Arc<Hub>, id: &'static str, background: bool) {
     let Some(def) = services::service(id) else { return };
+    // A background load was approved a moment ago, under the core lock; this job runs later. If the service was found signed out
+    // (or turned off) in between, don't create the page, and say it isn't loading after all.
+    if !hub.core.lock().unwrap().confirm_load(id, background) {
+        hub.emit_state();
+        layout(hub);
+        return;
+    }
     let win = ensure_window(hub);
     let lbl = label(id);
     if hub.app.get_webview(&lbl).is_some() {

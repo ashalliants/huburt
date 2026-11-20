@@ -362,6 +362,18 @@ impl Core {
         true
     }
 
+    /// Checked again on the UI thread just before a page is created (see `begin_load`, which approved it earlier): a background
+    /// load of a service that has been found signed out or turned off since is called off, and its "loading" state undone.
+    pub fn confirm_load(&mut self, id: &'static str, background: bool) -> bool {
+        let Some(s) = self.svcs.get_mut(id) else { return false };
+        if s.enabled && s.loaded && !(background && s.signed_out) { return true; }
+        if s.loaded {
+            s.loaded = false;
+            s.ready = false;
+        }
+        false
+    }
+
     /// The poller to send a "show as online" ping through, only if there is still something to keep online.
     pub fn presence_poller(&self, id: &str) -> Option<PollerHandle> {
         self.svcs.get(id).filter(|s| s.enabled && !s.signed_out).and_then(|s| s.poller.clone())
@@ -392,7 +404,7 @@ impl Core {
                 if let Some(next) = self.enabled_ids().first() { self.selected = next.to_string(); }
             }
         }
-        self.settings.save();
+        a.push(Action::Save);
         crate::log(&format!("{} turned {}", def.id, if on { "on" } else { "off" }));
         self.refresh_visibility(a);
         a.push(Action::Banner);
@@ -685,6 +697,11 @@ impl Hub {
         }
     }
 
+    /// Writes the settings file (serialised with every other save, and always the newest settings; see `Settings::save_latest`).
+    pub fn save_settings(self: &Arc<Self>) {
+        Settings::save_latest(|| self.core.lock().unwrap().settings.clone());
+    }
+
     pub fn tick(self: &Arc<Self>) {
         self.check_main_thread();
         let mut acts = vec![];
@@ -715,7 +732,7 @@ impl Hub {
                 Action::Layout => webviews::layout(self),
                 Action::State => self.emit_state(),
                 Action::Banner => self.update_tray(),
-                Action::Save => { let s = self.core.lock().unwrap().settings.clone(); s.save(); }
+                Action::Save => self.save_settings(),
                 Action::Probe(id, kind, js) => webviews::eval(self, id, &services::probe_js(id, kind, &js)),
                 Action::Poll(id, generation) => self.spawn_poll(id, generation),
                 Action::Presence(id) => self.spawn_presence(id),
@@ -736,7 +753,7 @@ impl Hub {
     fn load_inner(self: &Arc<Self>, id: &'static str, background: bool) {
         let go = self.with(|c, _| c.begin_load(id, background));
         if go {
-            webviews::create_service(self, id);
+            webviews::create_service(self, id, background);
             self.with(|_, a| { a.push(Action::Layout); a.push(Action::State); });
         }
     }
@@ -937,7 +954,7 @@ impl Hub {
             let Some(def) = services::service(id) else { return };
             c.selected = def.id.to_string();
             c.settings.last_selected = Some(def.id.to_string());
-            c.settings.save();
+            a.push(Action::Save);
             c.refresh_visibility(a);
         });
     }
@@ -970,7 +987,7 @@ impl Hub {
             let tmp = Settings { order, ..Default::default() };
             c.order = tmp.resolved_order(&ids);
             c.settings.order = c.order.clone();
-            c.settings.save();
+            a.push(Action::Save);
             a.push(Action::State);
         });
     }
@@ -1011,7 +1028,7 @@ impl Hub {
     pub fn mute(self: &Arc<Self>, id: &str, until: Option<f64>) {
         self.with(|c, a| {
             match until { Some(t) => { c.settings.muted_until.insert(id.to_string(), t); } None => { c.settings.muted_until.remove(id); } }
-            c.settings.save();
+            a.push(Action::Save);
             crate::log(&format!("{id} notifications {}", if until.is_some() { "muted" } else { "unmuted" }));
             a.push(Action::State);
             a.push(Action::Banner);
@@ -1021,7 +1038,7 @@ impl Hub {
     pub fn pause(self: &Arc<Self>, until: Option<f64>) {
         self.with(|c, a| {
             c.settings.paused_until = until.unwrap_or(0.0);
-            c.settings.save();
+            a.push(Action::Save);
             crate::log(&format!("notifications {}", if until.is_some() { "paused" } else { "resumed" }));
             a.push(Action::State);
             a.push(Action::Banner);
@@ -1040,7 +1057,7 @@ impl Hub {
     pub fn set_gmail_source(self: &Arc<Self>, source: &str) {
         self.with(|c, a| {
             c.settings.gmail_source = source.to_string();
-            c.settings.save();
+            a.push(Action::Save);
             if let Some(s) = c.svcs.get_mut("gmail") {
                 s.poll_gen += 1;
                 if let Some(p) = &s.poller { p.reconfigure(Some(("source", source)), true); }   // one message, before the poll below
@@ -1054,7 +1071,7 @@ impl Hub {
     pub fn set_slack_online_mode(self: &Arc<Self>, mode: &str) {
         self.with(|c, a| {
             c.settings.slack_online_mode = mode.to_string();
-            c.settings.save();
+            a.push(Action::Save);
             crate::log(&format!("slack show as online: {mode}"));
             c.next_presence_tick = Instant::now();
             a.push(Action::State);
@@ -1114,11 +1131,14 @@ impl Hub {
     // MARK: daily greeting
 
     fn greet(self: &Arc<Self>, force: bool) {
-        let (title, body) = {
+        {
             let mut c = self.core.lock().unwrap();
             if !force && c.settings.last_greeting_day == day_key() { return; }
             c.settings.last_greeting_day = day_key();
-            c.settings.save();
+        }
+        self.save_settings();
+        let (title, body) = {
+            let c = self.core.lock().unwrap();
             let ids = c.enabled_ids();
             // no point if you're already in Hub
             if c.is_paused() || (c.window_visible && c.window_focused) || ids.is_empty() { return; }
@@ -1365,6 +1385,20 @@ mod tests {
     }
 
     #[test]
+    fn a_background_page_is_called_off_if_the_service_was_found_signed_out_before_it_was_created() {
+        let mut c = core();
+        assert!(c.begin_load("whatsapp", true));   // approved under the core lock...
+        c.set_signed_out("whatsapp", true, &mut vec![]);   // ...then found signed out before the UI thread gets to it
+        assert!(!c.confirm_load("whatsapp", true), "the page must not be created");
+        assert!(!c.svcs["whatsapp"].loaded, "and it is no longer shown as loading");
+        // opening it yourself is never called off
+        assert!(c.begin_load("whatsapp", false));
+        assert!(c.confirm_load("whatsapp", false));
+        // nor a service that is still signed in
+        assert!(c.begin_load("gmail", true) && c.confirm_load("gmail", true));
+    }
+
+    #[test]
     fn presence_pings_only_go_to_an_enabled_signed_in_slack() {
         let mut c = core();
         let (poller, _calls) = test_poller(Duration::ZERO);
@@ -1560,8 +1594,6 @@ mod tests {
 
     #[test]
     fn turning_a_service_off_closes_it_clears_its_counts_and_moves_selection_on() {
-        let dir = std::env::temp_dir().join(format!("hub-test-{}", std::process::id()));
-        std::env::set_var("HUB_SETTINGS_DIR", &dir);
         let mut c = core();
         c.window_visible = true;
         c.selected = "slack".into();
@@ -1575,7 +1607,7 @@ mod tests {
         assert!(!c.svcs["slack"].loaded);
         assert_ne!(c.selected, "slack", "selection moves to a service that is still on");
         assert!(c.settings.disabled.contains(&"slack".to_string()));
-        let _ = std::fs::remove_dir_all(dir);
+        assert!(acts.iter().any(|a| matches!(a, Action::Save)), "saved, through the one serialised path");
     }
 
 
