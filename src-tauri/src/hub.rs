@@ -1453,6 +1453,21 @@ mod tests {
     }
 
     #[test]
+    fn a_stale_close_never_closes_a_page_that_is_wanted_loaded_again() {
+        // The unload was decided, then you opened the service and a load was queued ahead of the close job. When the close
+        // finally runs, the service is marked loaded again, and the job (which only closes services that are not) must skip it.
+        let mut c = core();
+        c.svcs.get_mut("gmail").unwrap().loaded = true;
+        assert!(c.begin_unload("gmail", true));   // decided: unload
+        assert!(!c.svcs["gmail"].loaded);
+        assert!(c.begin_load("gmail", false));    // then wanted again before the close ran
+        assert!(c.svcs["gmail"].loaded, "so the close job sees a loaded service and leaves the page alone");
+        // while a service that stayed unloaded is closed as usual
+        assert!(c.begin_unload("gmail", true));
+        assert!(!c.svcs["gmail"].loaded);
+    }
+
+    #[test]
     fn a_background_load_you_selected_the_service_for_is_not_cancelled_by_a_sign_out() {
         let mut c = core();
         assert!(c.begin_load("whatsapp", true));   // approved as background work
