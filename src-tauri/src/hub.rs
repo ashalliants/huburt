@@ -325,9 +325,15 @@ impl Core {
     }
 
     pub fn set_signed_out(&mut self, id: &'static str, v: bool, acts: &mut Vec<Action>) {
+        let visible = self.is_visible(id);
         let Some(s) = self.svcs.get_mut(id) else { return };
         if s.signed_out == v { return; }
         s.signed_out = v;
+        if v && s.loaded && !visible {
+            // A page that is open only for background work is closed the moment the service is found signed out. Window jobs run
+            // in order, so this also closes a background page whose creation was still in flight when this happened.
+            acts.push(Action::Unload(id));
+        }
         if !v && s.def.sleep_cycle.is_some() {
             // Signed in: the first background sync is a full interval away. (A restart that saved the signed-out state never
             // did the quick first look, and while the page was open the scheduler didn't get to mark it as done.)
@@ -1396,6 +1402,24 @@ mod tests {
         assert!(c.confirm_load("whatsapp", false));
         // nor a service that is still signed in
         assert!(c.begin_load("gmail", true) && c.confirm_load("gmail", true));
+    }
+
+    #[test]
+    fn finding_a_service_signed_out_closes_a_page_that_was_open_only_for_background_work() {
+        let mut c = core();
+        assert!(c.begin_load("whatsapp", true));   // a background wake's page, still being created
+        let mut acts = vec![];
+        c.set_signed_out("whatsapp", true, &mut acts);
+        assert!(acts.iter().any(|a| matches!(a, Action::Unload("whatsapp"))), "closed from the transition itself");
+
+        // a page you are looking at is left alone: you may be signing in
+        let mut c = core();
+        c.window_visible = true;
+        c.selected = "whatsapp".into();
+        c.svcs.get_mut("whatsapp").unwrap().loaded = true;
+        let mut acts = vec![];
+        c.set_signed_out("whatsapp", true, &mut acts);
+        assert!(!acts.iter().any(|a| matches!(a, Action::Unload(_))), "never unloaded under you");
     }
 
     #[test]
