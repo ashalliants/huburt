@@ -15,16 +15,17 @@ use std::{
 /// What an operation tells the app about the poller afterwards.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Report {
-    /// A poll finished.
-    Polled { result: Option<PollResult>, signed_out: bool, needs_creds: bool },
+    /// A poll finished. `generation` is the one the poll was requested under (see `PollerHandle::poll`).
+    Polled { generation: u64, result: Option<PollResult>, signed_out: bool, needs_creds: bool },
     /// Credentials were handed over.
     Credentials { needs_creds: bool },
 }
 
 enum Op {
-    Poll,
-    Reset,
-    SetOption(&'static str, String),
+    Poll(u64),
+    /// Changing a poller's options and making it forget what it has seen, as ONE message, so nothing can be handled between
+    /// the parts.
+    Reconfigure { option: Option<(&'static str, String)>, reset: bool },
     Credentials(Credentials),
     KeepOnline(Box<dyn FnOnce(bool) + Send>),
     Perform { action: String, info: HashMap<String, String>, text: Option<String>, done: Box<dyn FnOnce(bool) + Send> },
@@ -45,12 +46,14 @@ impl PollerHandle {
             .spawn(move || {
                 for op in rx {
                     match op {
-                        Op::Poll => {
+                        Op::Poll(generation) => {
                             let result = poller.poll();
-                            report(id, Report::Polled { result, signed_out: poller.signed_out(), needs_creds: poller.needs_credentials() });
+                            report(id, Report::Polled { generation, result, signed_out: poller.signed_out(), needs_creds: poller.needs_credentials() });
                         }
-                        Op::Reset => poller.reset(),
-                        Op::SetOption(key, value) => poller.set_option(key, &value),
+                        Op::Reconfigure { option, reset } => {
+                            if let Some((key, value)) = option { poller.set_option(key, &value); }
+                            if reset { poller.reset(); }
+                        }
                         Op::Credentials(creds) => {
                             poller.set_credentials(creds);
                             report(id, Report::Credentials { needs_creds: poller.needs_credentials() });
@@ -64,11 +67,14 @@ impl PollerHandle {
         PollerHandle { tx }
     }
 
-    /// Check for unread items now; the answer arrives as `Report::Polled`.
-    pub fn poll(&self) { let _ = self.tx.send(Op::Poll); }
-    /// Forget what has been seen, so the next poll only records the starting point.
-    pub fn reset(&self) { let _ = self.tx.send(Op::Reset); }
-    pub fn set_option(&self, key: &'static str, value: &str) { let _ = self.tx.send(Op::SetOption(key, value.to_string())); }
+    /// Check for unread items now; the answer arrives as `Report::Polled`, carrying `generation`. The app bumps the
+    /// generation whenever it reconfigures the poller and ignores answers from older ones, which were computed with the old
+    /// options or the old "what has been seen".
+    pub fn poll(&self, generation: u64) { let _ = self.tx.send(Op::Poll(generation)); }
+    /// Set an option and/or forget what has been seen (so the next poll only records the starting point), atomically.
+    pub fn reconfigure(&self, option: Option<(&'static str, &str)>, reset: bool) {
+        let _ = self.tx.send(Op::Reconfigure { option: option.map(|(k, v)| (k, v.to_string())), reset });
+    }
     pub fn credentials(&self, creds: Credentials) { let _ = self.tx.send(Op::Credentials(creds)); }
     /// Slack "show as online"; `done(true)` if it was sent.
     pub fn keep_online(&self, done: impl FnOnce(bool) + Send + 'static) { let _ = self.tx.send(Op::KeepOnline(Box::new(done))); }
@@ -132,11 +138,11 @@ mod tests {
     #[test]
     fn operations_run_in_the_order_they_were_sent() {
         let (p, calls, _rx) = start(Duration::ZERO);
-        p.reset();                                     // e.g. a service being turned back on...
-        p.poll();                                      // ...and the poll that follows must see the reset
-        p.set_option("source", "all");
+        p.reconfigure(None, true);                     // e.g. a service being turned back on...
+        p.poll(1);                                     // ...and the poll that follows must see the reset
+        p.reconfigure(Some(("source", "all")), false);
         p.credentials(Credentials::default());
-        p.poll();
+        p.poll(2);
         wait_for(&calls, 5);
         assert_eq!(*calls.lock().unwrap(), vec!["reset", "poll", "option source=all", "credentials", "poll"]);
     }
@@ -147,23 +153,46 @@ mod tests {
         // report ("still needs credentials") must be delivered BEFORE the credentials' ("has them"), so applying reports in
         // order ends on the newer state. (Sampling the state later, under another lock, could do the opposite.)
         let (p, _calls, rx) = start(Duration::from_millis(100));
-        p.poll();
+        p.poll(7);
         p.credentials(Credentials::default());
         let first = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         let second = rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert_eq!(first, Report::Polled { result: None, signed_out: false, needs_creds: true });
+        assert_eq!(first, Report::Polled { generation: 7, result: None, signed_out: false, needs_creds: true });
         assert_eq!(second, Report::Credentials { needs_creds: false });
+    }
+
+    #[test]
+    fn a_reconfiguration_is_one_message_that_nothing_can_slip_into() {
+        // Another thread (the one that refreshes cookies and then polls) can be sending polls at the same moment the app
+        // reconfigures the poller. Option and reset must still be handled back to back: a poll between them would run with
+        // the new option but the old "what has been seen".
+        let (p, calls, _rx) = start(Duration::ZERO);
+        let spammer = {
+            let p = p.clone();
+            std::thread::spawn(move || { for i in 0..300 { p.poll(i); } })
+        };
+        for _ in 0..50 {
+            p.reconfigure(Some(("source", "all")), true);
+        }
+        spammer.join().unwrap();
+        wait_for(&calls, 350);
+        let log = calls.lock().unwrap().clone();
+        assert_eq!(log.iter().filter(|c| c.starts_with("option")).count(), 50);
+        for (i, call) in log.iter().enumerate() {
+            if call.starts_with("option") {
+                assert_eq!(log.get(i + 1).map(String::as_str), Some("reset"), "a poll slipped between option and reset at {i}");
+            }
+        }
     }
 
     #[test]
     fn sending_never_waits_for_a_busy_poller() {
         let (p, _calls, _rx) = start(Duration::from_millis(500));
-        p.poll();                                      // busy for half a second
+        p.poll(1);                                     // busy for half a second
         let started = Instant::now();
-        p.reset();
-        p.set_option("source", "important");
+        p.reconfigure(Some(("source", "important")), true);
         p.credentials(Credentials::default());
-        p.poll();
+        p.poll(2);
         assert!(started.elapsed() < Duration::from_millis(100), "sending must return at once");
     }
 
@@ -171,7 +200,7 @@ mod tests {
     fn button_presses_and_presence_report_back_after_everything_queued_before_them() {
         let (p, calls, _rx) = start(Duration::ZERO);
         let (tx, rx) = mpsc::channel();
-        p.reset();
+        p.reconfigure(None, true);
         let t = tx.clone();
         p.perform("reply".into(), HashMap::new(), Some("thanks".into()), move |ok| t.send(("perform", ok)).unwrap());
         p.keep_online(move |ok| tx.send(("online", ok)).unwrap());

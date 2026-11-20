@@ -60,6 +60,8 @@ pub struct Svc {
     pub harvest_js: Option<&'static str>,
     /// A poll has been requested and its report hasn't come back yet.
     pub poll_inflight: bool,
+    /// Bumped whenever the poller is reconfigured; a poll's answer is only applied if it was requested under the current one.
+    pub poll_gen: u64,
     pub poller_healthy: bool,
     pub next_poll: Instant,
     pub cookies: Vec<Cookie>,
@@ -108,7 +110,7 @@ pub enum Action {
     Close(&'static str),
     Probe(&'static str, &'static str, String),
     Layout,
-    Poll(&'static str),
+    Poll(&'static str, u64),
     Presence(&'static str),
     Harvest(&'static str),
     Notify(&'static Service, NotificationItem),
@@ -186,6 +188,7 @@ impl Svc {
             pending_poller: poller,
             poller: None,
             poll_inflight: false,
+            poll_gen: 0,
             poller_healthy: false,
             next_poll: now,
             cookies: vec![],
@@ -334,7 +337,8 @@ impl Core {
         s.enabled = on;
         if on {
             // sent while the core lock is held, so no later poll can start before it (they're handled in order)
-            if let Some(p) = &s.poller { p.reset(); }
+            s.poll_gen += 1;   // answers from polls started before this are stale
+            if let Some(p) = &s.poller { p.reconfigure(None, true); }
             s.did_first_wake = false; s.primed_wake = false; s.next_poll = Instant::now(); s.next_wake = None;
             self.settings.disabled.retain(|d| d != def.id);
         } else {
@@ -342,7 +346,8 @@ impl Core {
             s.loaded = false; s.ready = false;
             s.idle_deadline = None; s.wake_session = false; s.cred_wake = false; s.unread = 0; s.quiet = 0;
             s.last_checked = None; s.error = None; s.signed_out = false; s.keeping_online = false;
-            if let Some(p) = &s.poller { p.reset(); }
+            s.poll_gen += 1;
+            if let Some(p) = &s.poller { p.reconfigure(None, true); }
             self.settings.disabled.push(def.id.to_string());
             if sel == def.id {
                 if let Some(next) = self.enabled_ids().first() { self.selected = next.to_string(); }
@@ -352,6 +357,39 @@ impl Core {
         crate::log(&format!("{} turned {}", def.id, if on { "on" } else { "off" }));
         self.refresh_visibility(a);
         a.push(Action::Banner);
+    }
+
+    /// A poll answered. Returns the banners to show. An answer is only applied if the poller hasn't been reconfigured since
+    /// the poll was requested (`generation`): otherwise it was computed with the old options or the old "what has been
+    /// seen" and would announce stale items as new.
+    pub fn poll_finished(&mut self, id: &'static str, generation: u64, result: Option<PollResult>, signed_out: bool, needs_creds: bool, acts: &mut Vec<Action>) -> Vec<NotificationItem> {
+        let Some(s) = self.svcs.get_mut(id) else { return vec![] };
+        s.poll_inflight = false;
+        s.needs_creds = needs_creds;   // the poller's state at that moment; reports arrive in order, so this is never stale
+        if generation != s.poll_gen || !s.enabled { return vec![]; }
+        self.set_signed_out(id, signed_out, acts);
+        let Some(s) = self.svcs.get_mut(id) else { return vec![] };
+        let Some(r) = result else { return vec![] };
+        if s.loaded && !s.def.poll_while_loaded { return vec![]; }
+        s.poller_healthy = true;
+        s.last_checked = Some(Instant::now());
+        s.quiet = r.quiet_unread;
+        let grew = r.unread > s.unread;
+        s.unread = r.unread;
+        // While the page is open it posts its own notifications, so only notify for what the poller finds while unloaded
+        let mut notifications = vec![];
+        if !s.loaded {
+            let mut items = r.new_items;
+            if items.len() > MAX_BANNERS {
+                let noun = if id == "gmail" { "emails" } else { "messages" };
+                items = vec![NotificationItem { title: s.def.name.into(), body: format!("{} new {noun}", items.len()), ..Default::default() }];
+            }
+            notifications = items;
+        }
+        if grew { self.note_activity(id); }
+        acts.push(Action::Banner);
+        acts.push(Action::State);
+        notifications
     }
 
     // MARK: scheduler
@@ -442,7 +480,7 @@ impl Core {
             } else if (!s.loaded || s.def.poll_while_loaded) && !s.poll_inflight && now >= s.next_poll && !s.needs_credentials() {
                 s.next_poll = now + Duration::from_secs(s.def.poll_interval);
                 s.poll_inflight = true;
-                acts.push(Action::Poll(id));
+                acts.push(Action::Poll(id, s.poll_gen));
             }
         }
         if s.cred_wake && now >= s.next_cred_check {
@@ -624,7 +662,7 @@ impl Hub {
                 Action::State => self.emit_state(),
                 Action::Banner => self.update_tray(),
                 Action::Probe(id, kind, js) => webviews::eval(self, id, &services::probe_js(id, kind, &js)),
-                Action::Poll(id) => self.spawn_poll(id),
+                Action::Poll(id, generation) => self.spawn_poll(id, generation),
                 Action::Presence(id) => self.spawn_presence(id),
                 Action::Harvest(id) => self.harvest(id),
                 Action::Notify(svc, item) => self.notify(svc, item),
@@ -673,10 +711,10 @@ impl Hub {
 
     // MARK: polling
 
-    fn spawn_poll(self: &Arc<Self>, id: &'static str) {
+    fn spawn_poll(self: &Arc<Self>, id: &'static str, generation: u64) {
         let Some((poller, loaded)) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone().map(|p| (p, s.loaded))) else { return };
         if !loaded {
-            poller.poll();   // the answer comes back as a report, see `poller_report`
+            poller.poll(generation);   // the answer comes back as a report, see `poller_report`
             return;
         }
         // While the page is open its cookies are readable: use the freshest ones (the services rotate them). Reading them
@@ -687,14 +725,14 @@ impl Hub {
             if !cookies.is_empty() {
                 poller.credentials(Credentials { cookies, page_data: None });
             }
-            poller.poll();
+            poller.poll(generation);
         });
     }
 
     /// What a poller reported after an operation. They arrive in the order the operations were sent.
     fn poller_report(self: &Arc<Self>, id: &'static str, report: Report) {
         match report {
-            Report::Polled { result, signed_out, needs_creds } => self.poll_done(id, result, signed_out, needs_creds),
+            Report::Polled { generation, result, signed_out, needs_creds } => self.poll_done(id, generation, result, signed_out, needs_creds),
             Report::Credentials { needs_creds } => self.with(|c, _| { if let Some(s) = c.svcs.get_mut(id) { s.needs_creds = needs_creds; } }),
         }
     }
@@ -710,35 +748,8 @@ impl Hub {
         }
     }
 
-    fn poll_done(self: &Arc<Self>, id: &'static str, result: Option<PollResult>, signed_out: bool, needs_creds: bool) {
-        let mut notifications = vec![];
-        self.with(|c, acts| {
-            let Some(s) = c.svcs.get_mut(id) else { return };
-            s.poll_inflight = false;
-            s.needs_creds = needs_creds;
-            if !s.enabled { return; }
-            c.set_signed_out(id, signed_out, acts);
-            let Some(s) = c.svcs.get_mut(id) else { return };
-            let Some(r) = result else { return };
-            if s.loaded && !s.def.poll_while_loaded { return; }
-            s.poller_healthy = true;
-            s.last_checked = Some(Instant::now());
-            s.quiet = r.quiet_unread;
-            let grew = r.unread > s.unread;
-            s.unread = r.unread;
-            // While the page is open it posts its own notifications, so only notify for what the poller finds while unloaded
-            if !s.loaded {
-                let mut items = r.new_items;
-                if items.len() > MAX_BANNERS {
-                    let noun = if id == "gmail" { "emails" } else { "messages" };
-                    items = vec![NotificationItem { title: s.def.name.into(), body: format!("{} new {noun}", items.len()), ..Default::default() }];
-                }
-                notifications = items;
-            }
-            if grew { c.note_activity(id); }
-            acts.push(Action::Banner);
-            acts.push(Action::State);
-        });
+    fn poll_done(self: &Arc<Self>, id: &'static str, generation: u64, result: Option<PollResult>, signed_out: bool, needs_creds: bool) {
+        let notifications = self.with(|c, acts| c.poll_finished(id, generation, result, signed_out, needs_creds, acts));
         if let Some(svc) = services::service(id) {
             for item in notifications { self.notify(svc, item); }
         }
@@ -978,7 +989,8 @@ impl Hub {
             c.settings.gmail_source = source.to_string();
             c.settings.save();
             if let Some(s) = c.svcs.get_mut("gmail") {
-                if let Some(p) = &s.poller { p.set_option("source", source); p.reset(); }   // in order, before the poll below
+                s.poll_gen += 1;
+                if let Some(p) = &s.poller { p.reconfigure(Some(("source", source)), true); }   // one message, before the poll below
                 s.next_poll = Instant::now();   // re-read the count straight away
             }
             crate::log(&format!("gmail count source: {source}"));
@@ -1328,7 +1340,7 @@ mod tests {
         let (poller, calls) = test_poller(Duration::from_secs(4));
         c.svcs.get_mut("slack").unwrap().poller = Some(poller.clone());
         c.svcs.get_mut("slack").unwrap().needs_creds = false;
-        poller.poll();   // now busy for 4 seconds
+        poller.poll(0);   // now busy for 4 seconds
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -1358,10 +1370,31 @@ mod tests {
         c.set_enabled(gmail, false, &mut acts);
         c.set_enabled(gmail, true, &mut acts);
         assert!(c.svcs["gmail"].next_poll <= Instant::now(), "a poll is due straight away");
-        poller.poll();   // what the scheduler does next
+        poller.poll(c.svcs["gmail"].poll_gen);   // what the scheduler does next
         let until = Instant::now() + Duration::from_secs(3);
         while calls.lock().unwrap().len() < 3 && Instant::now() < until { std::thread::sleep(Duration::from_millis(5)); }
         assert_eq!(*calls.lock().unwrap(), vec!["reset", "reset", "poll"]);
+        assert_eq!(c.svcs["gmail"].poll_gen, 2, "each change bumps the generation");
+    }
+
+    #[test]
+    fn an_answer_from_before_a_reconfiguration_is_ignored() {
+        let mut c = core();
+        let s = c.svcs.get_mut("gmail").unwrap();
+        s.poll_inflight = true;
+        s.poll_gen = 3;   // reconfigured since the poll below was requested under generation 2
+        let item = NotificationItem { title: "Someone".into(), body: "hello".into(), ..Default::default() };
+        let stale = PollResult { unread: 5, new_items: vec![item.clone()], quiet_unread: 0 };
+        let mut acts = vec![];
+        let shown = c.poll_finished("gmail", 2, Some(stale), false, false, &mut acts);
+        assert!(shown.is_empty(), "stale items must not become banners");
+        assert_eq!(c.svcs["gmail"].unread, 0, "stale counts are not applied");
+        assert!(!c.svcs["gmail"].poll_inflight, "but the service can be polled again");
+
+        let fresh = PollResult { unread: 5, new_items: vec![item.clone()], quiet_unread: 0 };
+        let shown = c.poll_finished("gmail", 3, Some(fresh), false, false, &mut acts);
+        assert_eq!(shown, vec![item]);
+        assert_eq!(c.svcs["gmail"].unread, 5);
     }
 
     #[test]
