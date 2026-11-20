@@ -59,7 +59,9 @@ impl PollerHandle {
                             report(id, Report::Credentials { needs_creds: poller.needs_credentials() });
                         }
                         // the guard is checked here, on the poller's thread, at the moment of sending: the op may have waited behind
-                        // a long poll, and what was true when it was queued may not be true now
+                        // a long poll, and what was true when it was queued may not be true now. (What remains is the instant between
+                        // the guard and the request: closing that would mean holding the core lock across a network request, the
+                        // very thing that froze the app, and the worst case is one harmless ping, so it is deliberately left.)
                         Op::KeepOnline { guard, done } => done(guard() && poller.keep_online()),
                         Op::Perform { action, info, text, done } => done(poller.perform(&action, &info, text.as_deref())),
                     }

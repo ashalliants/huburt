@@ -515,7 +515,12 @@ impl Core {
                     crate::log(&format!("{id} loading once to pick up credentials"));
                     acts.push(Action::LoadBackground(id));
                 }
-            } else if (!s.loaded || s.def.poll_while_loaded) && !s.poll_inflight && now >= s.next_poll && !s.needs_credentials() {
+            } else if (s.loaded || !s.signed_out)
+                && (!s.loaded || s.def.poll_while_loaded)
+                && !s.poll_inflight && now >= s.next_poll && !s.needs_credentials()
+            {
+                // (an unloaded signed-out service isn't polled: nothing can change until you open it, and while it is open
+                // polling carries on, which is how signing in is noticed)
                 s.next_poll = now + Duration::from_secs(s.def.poll_interval);
                 s.poll_inflight = true;
                 acts.push(Action::Poll(id, s.poll_gen));
@@ -1255,6 +1260,35 @@ mod tests {
                 assert!(!has_load(&acts, id), "{id} must stay quiet while signed out (after {minutes} min)");
             }
         }
+    }
+
+    #[test]
+    fn a_signed_out_service_is_not_polled_while_unloaded_but_is_while_open_so_sign_in_is_noticed() {
+        // Gmail can be marked signed out by a 401 while its cookies are still held, so it has credentials and would otherwise keep polling
+        let mut c = core();
+        let s = c.svcs.get_mut("gmail").unwrap();
+        s.signed_out = true;
+        s.needs_creds = false;
+        let t0 = Instant::now();
+        let polls = |acts: &[Action]| acts.iter().filter(|a| matches!(a, Action::Poll("gmail", _))).count();
+        for minutes in [0u64, 2, 10, 60] {
+            let mut acts = vec![];
+            c.tick_service("gmail", t0 + Duration::from_secs(minutes * 60), &mut acts);
+            assert_eq!(polls(&acts), 0, "no background polling while signed out (after {minutes} min)");
+        }
+        // open (loaded): polling resumes, so a sign-in is noticed
+        let s = c.svcs.get_mut("gmail").unwrap();
+        s.loaded = true;
+        s.next_poll = t0;
+        let mut acts = vec![];
+        c.tick_service("gmail", t0 + Duration::from_secs(3 * 60 * 60), &mut acts);
+        assert_eq!(polls(&acts), 1, "a page you have open keeps being checked");
+        // and a signed-in unloaded service polls as normal
+        let mut c = core();
+        c.svcs.get_mut("gmail").unwrap().needs_creds = false;
+        let mut acts = vec![];
+        c.tick_service("gmail", Instant::now(), &mut acts);
+        assert_eq!(polls(&acts), 1);
     }
 
     #[test]
