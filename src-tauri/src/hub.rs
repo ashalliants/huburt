@@ -803,8 +803,10 @@ impl Hub {
 
     fn spawn_presence(self: &Arc<Self>, id: &'static str) {
         let Some(poller) = self.core.lock().unwrap().presence_poller(id) else { return };
-        let hub = self.clone();
-        poller.keep_online(move |sent| {
+        let (hub, still_wanted) = (self.clone(), self.clone());
+        // the ping can wait behind a long poll, so "is there still something to keep online?" is asked again when it is
+        // about to be sent
+        poller.keep_online(move || still_wanted.core.lock().unwrap().presence_poller(id).is_some(), move |sent| {
             if sent {
                 hub.with(|c, _| { if let Some(s) = c.svcs.get_mut(id) { s.last_presence_ping = Some(Instant::now()); } });
             }

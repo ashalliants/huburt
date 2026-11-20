@@ -27,7 +27,7 @@ enum Op {
     /// the parts.
     Reconfigure { option: Option<(&'static str, String)>, reset: bool },
     Credentials(Credentials),
-    KeepOnline(Box<dyn FnOnce(bool) + Send>),
+    KeepOnline { guard: Box<dyn FnOnce() -> bool + Send>, done: Box<dyn FnOnce(bool) + Send> },
     Perform { action: String, info: HashMap<String, String>, text: Option<String>, done: Box<dyn FnOnce(bool) + Send> },
 }
 
@@ -58,7 +58,9 @@ impl PollerHandle {
                             poller.set_credentials(creds);
                             report(id, Report::Credentials { needs_creds: poller.needs_credentials() });
                         }
-                        Op::KeepOnline(done) => done(poller.keep_online()),
+                        // the guard is checked here, on the poller's thread, at the moment of sending: the op may have waited behind
+                        // a long poll, and what was true when it was queued may not be true now
+                        Op::KeepOnline { guard, done } => done(guard() && poller.keep_online()),
                         Op::Perform { action, info, text, done } => done(poller.perform(&action, &info, text.as_deref())),
                     }
                 }
@@ -76,8 +78,11 @@ impl PollerHandle {
         let _ = self.tx.send(Op::Reconfigure { option: option.map(|(k, v)| (k, v.to_string())), reset });
     }
     pub fn credentials(&self, creds: Credentials) { let _ = self.tx.send(Op::Credentials(creds)); }
-    /// Slack "show as online"; `done(true)` if it was sent.
-    pub fn keep_online(&self, done: impl FnOnce(bool) + Send + 'static) { let _ = self.tx.send(Op::KeepOnline(Box::new(done))); }
+    /// Slack "show as online"; `done(true)` if it was sent. `guard` is asked just before sending (on the poller's thread, after
+    /// everything queued earlier has finished) and the ping is skipped, `done(false)`, if it says no.
+    pub fn keep_online(&self, guard: impl FnOnce() -> bool + Send + 'static, done: impl FnOnce(bool) + Send + 'static) {
+        let _ = self.tx.send(Op::KeepOnline { guard: Box::new(guard), done: Box::new(done) });
+    }
     /// A banner button (reply, mark as read); `done(true)` if it worked.
     pub fn perform(&self, action: String, info: HashMap<String, String>, text: Option<String>, done: impl FnOnce(bool) + Send + 'static) {
         let _ = self.tx.send(Op::Perform { action, info, text, done: Box::new(done) });
@@ -186,6 +191,25 @@ mod tests {
     }
 
     #[test]
+    fn a_presence_ping_is_checked_when_it_is_about_to_be_sent_not_when_it_was_queued() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (p, calls, _rx) = start(Duration::from_millis(200));
+        let signed_in = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::channel();
+        p.poll(1);                                     // busy for 200 ms, so the ping below waits in the queue
+        let flag = signed_in.clone();
+        p.keep_online(move || flag.load(Ordering::SeqCst), move |sent| tx.send(sent).unwrap());
+        signed_in.store(false, Ordering::SeqCst);      // signed out while the ping is still queued
+        assert!(!rx.recv_timeout(Duration::from_secs(3)).unwrap(), "it must not be sent");
+        assert!(!calls.lock().unwrap().iter().any(|c| c == "keep_online"), "the poller was never asked to send it");
+
+        // and while still signed in at the moment of sending, it goes out
+        let (tx, rx) = mpsc::channel();
+        p.keep_online(|| true, move |sent| tx.send(sent).unwrap());
+        assert!(rx.recv_timeout(Duration::from_secs(3)).unwrap());
+    }
+
+    #[test]
     fn sending_never_waits_for_a_busy_poller() {
         let (p, _calls, _rx) = start(Duration::from_millis(500));
         p.poll(1);                                     // busy for half a second
@@ -203,7 +227,7 @@ mod tests {
         p.reconfigure(None, true);
         let t = tx.clone();
         p.perform("reply".into(), HashMap::new(), Some("thanks".into()), move |ok| t.send(("perform", ok)).unwrap());
-        p.keep_online(move |ok| tx.send(("online", ok)).unwrap());
+        p.keep_online(|| true, move |ok| tx.send(("online", ok)).unwrap());
         assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), ("perform", true));
         assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), ("online", true));
         assert_eq!(*calls.lock().unwrap(), vec!["reset", "perform reply thanks", "keep_online"]);
