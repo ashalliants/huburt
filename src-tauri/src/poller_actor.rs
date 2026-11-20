@@ -27,7 +27,7 @@ enum Op {
     /// the parts.
     Reconfigure { option: Option<(&'static str, String)>, reset: bool },
     Credentials(Credentials),
-    KeepOnline { guard: Box<dyn FnOnce() -> bool + Send>, done: Box<dyn FnOnce(bool) + Send> },
+    KeepOnline { guard: Box<dyn Fn() -> bool + Send>, done: Box<dyn FnOnce(bool) + Send> },
     Perform { action: String, info: HashMap<String, String>, text: Option<String>, done: Box<dyn FnOnce(bool) + Send> },
 }
 
@@ -58,11 +58,11 @@ impl PollerHandle {
                             poller.set_credentials(creds);
                             report(id, Report::Credentials { needs_creds: poller.needs_credentials() });
                         }
-                        // the guard is checked here, on the poller's thread, at the moment of sending: the op may have waited behind
-                        // a long poll, and what was true when it was queued may not be true now. (What remains is the instant between
-                        // the guard and the request: closing that would mean holding the core lock across a network request, the
-                        // very thing that froze the app, and the worst case is one harmless ping, so it is deliberately left.)
-                        Op::KeepOnline { guard, done } => done(guard() && poller.keep_online()),
+                        // the guard is checked here, on the poller's thread, at the moment of sending (the op may have waited behind a
+                        // long poll), and the poller asks it again before each of the several requests a ping is made of. What remains
+                        // is a request already in flight, which can't be taken back; closing even that would mean holding the core
+                        // lock across a network request, the very thing that froze the app.
+                        Op::KeepOnline { guard, done } => done(guard() && poller.keep_online(&*guard)),
                         Op::Perform { action, info, text, done } => done(poller.perform(&action, &info, text.as_deref())),
                     }
                 }
@@ -82,7 +82,7 @@ impl PollerHandle {
     pub fn credentials(&self, creds: Credentials) { let _ = self.tx.send(Op::Credentials(creds)); }
     /// Slack "show as online"; `done(true)` if it was sent. `guard` is asked just before sending (on the poller's thread, after
     /// everything queued earlier has finished) and the ping is skipped, `done(false)`, if it says no.
-    pub fn keep_online(&self, guard: impl FnOnce() -> bool + Send + 'static, done: impl FnOnce(bool) + Send + 'static) {
+    pub fn keep_online(&self, guard: impl Fn() -> bool + Send + 'static, done: impl FnOnce(bool) + Send + 'static) {
         let _ = self.tx.send(Op::KeepOnline { guard: Box::new(guard), done: Box::new(done) });
     }
     /// A banner button (reply, mark as read); `done(true)` if it worked.
@@ -122,7 +122,7 @@ mod tests {
             self.calls.lock().unwrap().push(format!("perform {action} {}", text.unwrap_or("")));
             true
         }
-        fn keep_online(&mut self) -> bool { self.calls.lock().unwrap().push("keep_online".into()); true }
+        fn keep_online(&mut self, _keep_going: &dyn Fn() -> bool) -> bool { self.calls.lock().unwrap().push("keep_online".into()); true }
     }
 
     fn start(poll_takes: Duration) -> (PollerHandle, Calls, mpsc::Receiver<Report>) {
