@@ -178,6 +178,7 @@ fn spawn_test_hooks(hub: Arc<Hub>) {
                 "show" => webviews::show_window(&h, false),
                 "select" => h.select(&p[1]),
                 "online" => h.set_slack_online_mode(&p[1]),
+                "ua" => { if let Some(d) = services::service(&p[1]) { webviews::eval(&h, d.id, &services::probe_js(d.id, "test", "navigator.userAgent")); } }
                 "probe" => { if let Some(d) = services::service(&p[1]) { webviews::eval(&h, d.id, &services::probe_js(d.id, "test", "1 + 1")); } }
                 "disable" => h.set_enabled(&p[1], false),
                 "enable" => h.set_enabled(&p[1], true),

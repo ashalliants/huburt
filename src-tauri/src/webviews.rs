@@ -219,8 +219,8 @@ fn create_service_now(hub: &Arc<Hub>, id: &'static str, background: bool) {
             b = b.data_directory(dir.join("stores").join(def.id));
         }
     }
-    if let Some(ua) = def.user_agent {
-        b = b.user_agent(ua);
+    if let Some(ua) = (def.user_agent)() {
+        b = b.user_agent(&ua);
     }
     b = b.initialization_script_for_all_frames(services::notification_shim_js(id));
     b = b.initialization_script(link_guard_js(def));
