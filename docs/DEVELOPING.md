@@ -55,8 +55,21 @@ commands: report a notification, report a probe result, open an external link an
 clicks to other sites are intercepted in the page and opened in the default browser; sign-in providers stay in the app only
 on a sign-in screen (`Service::stays_in_app` in `services.rs`).
 
+**Threads.** Windows has a documented deadlock: creating a window or web view, or reading cookies, hangs the whole app if it is
+done inside a synchronous command or an event handler (which is where the main thread runs everything). So nothing in Huburt
+calls those APIs on the main thread. All window and web view work is posted to one dedicated UI thread (`ui_thread.rs`),
+which runs the jobs in order; posting never blocks, and nothing on the main thread ever waits for that thread. Cookie reads
+and the unread pollers run on their own worker threads. A watchdog asks the main thread to answer a tiny job every tick and,
+if it stops answering for 8 seconds, writes "the main thread has not answered..." to the log together with what the UI thread
+was doing, so a freeze leaves evidence.
+
 **Locking rule.** `hub.rs` mutates its state under one lock, collects `Action`s, releases the lock, then performs them (web
-view calls, HTTP). Nothing that can block on the main thread runs while the lock is held.
+view calls, HTTP). Nothing that can block on the main thread runs while the lock is held, and the core never waits for a poller either: a poller
+is locked for the whole of a network request, so what the core needs to know about one (does it still need credentials?) is
+reported back by the poller after each operation. Each poller lives on its own thread (`poller_actor.rs`) and is driven by
+messages that are handled strictly in the order they were sent: sending never blocks, "reset, then poll" and "hand over
+credentials, then poll" can't be reordered, and the state each operation reports arrives in that same order, so a stale
+report can never overwrite a newer one.
 
 ### Source layout
 
@@ -66,7 +79,9 @@ view calls, HTTP). Nothing that can block on the main thread runs while the lock
 | `src-tauri/src/main.rs` | The launcher. macOS: loads the core library. Elsewhere: just runs the app. |
 | `hub.rs` | Per-service state, the scheduler, muting/pausing, Slack presence, the daily greeting. |
 | `slack.rs`, `gmail.rs`, `http.rs`, `pollers.rs` | The unread pollers and their HTTP layer. |
-| `webviews.rs` | The window, the sidebar and cover web views, the per-service web views, links, downloads, cookies. |
+| `poller_actor.rs` | Runs each poller on its own thread, driven by ordered, non-blocking messages. |
+| `webviews.rs` | The window, the sidebar and cover web views, the per-service web views, links, downloads, cookies. All of it runs on the UI thread. |
+| `ui_thread.rs` | The dedicated thread that every window and web view operation is posted to (see Threads above). |
 | `services.rs` | The service list, link rules, and the JavaScript injected into pages. |
 | `menus.rs`, `tray.rs` | Menu bar / tray icon and menus (macOS app menu too). |
 | `banner.rs`, `banner_win.rs` | Native notification banners with Reply / Mark as Read (UserNotifications on macOS, toasts on Windows). |
