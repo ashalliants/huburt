@@ -259,6 +259,16 @@ fn create_service_now(hub: &Arc<Hub>, id: &'static str, background: bool) {
         true
     });
     let _ = win.add_child(b, LogicalPosition::new(OFFSCREEN_X, 0.0), LogicalSize::new(800.0, 700.0));
+    // Creating the page can't be done while holding the core lock (it waits for the main thread), so a sign-out or turning the
+    // service off can still slip in during it. Ask again now: if the page is no longer wanted, close it straight away, so such a
+    // race leaves nothing behind.
+    if !hub.core.lock().unwrap().confirm_load(id, background) {
+        if let Some(wv) = hub.app.get_webview(&label(id)) {
+            let _ = wv.close();
+        }
+        hub.emit_state();
+        layout(hub);
+    }
 }
 
 fn unique_download_path(name: &str) -> PathBuf {
