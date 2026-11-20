@@ -220,6 +220,14 @@ That means Huburt thinks you're signed out, so it leaves that service alone in t
 again, and the "!" clears by itself within a few seconds for WhatsApp, or at the next check for Gmail, and the background checks
 resume. If it doesn't, right-click the service and choose **Reload**.
 
+### Gmail says "This browser version is no longer supported"
+
+On a Mac this was caused by Huburt telling Gmail nothing about its browser, so Gmail didn't recognise it. Huburt now presents itself
+to Gmail and WhatsApp as your Mac's own Safari (the real version number is read from your Safari, so it stays correct after
+macOS updates), and to Slack as Chrome. If you still see the message after updating to the latest Huburt, please
+[open an issue](https://github.com/ashalliants/huburt/issues) saying which system you're on. On Windows, Huburt uses the web view's
+own Edge-based identity.
+
 ### Gmail or Slack shows "Can't reach"
 
 The page didn't load within 25 seconds, usually because you're offline. Huburt retries every 30 seconds, or press **Try

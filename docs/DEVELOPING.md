@@ -126,6 +126,7 @@ new). Windows has no keychain approval to protect, so there it is one ordinary p
   `disable:gmail`, `enable:gmail`). `HUB_TEST_GREETING=1` sends the daily greeting after 8 seconds.
 - `HUB_DEBUG_COOKIES=1` logs how many cookies each page's store holds (never their values).
 - `HUB_LOG_FILE=<path>` writes the log somewhere else (to test a second copy without mixing its log with your own).
+- `ua:<service>` as a `HUB_TEST_STEPS` step logs the user agent that service's page reports (`ua:gmail:3`).
 - macOS: run the bundle with `open -n --env NAME=value --stdout f --stderr f Huburt.app`. `HUBURT_CORE=<path>` loads a
   different core library.
 
@@ -152,7 +153,7 @@ Same features as macOS, with these differences:
   window; the pages report the shortcuts themselves (`shortcut` command).
 - **Start at login** is the `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` registry entry, switched from the tray menu
   and turned on at the first launch of an installed copy.
-- Pages use WebView2's own browser identity (no user-agent override). Each service has its own profile folder under
+- Pages use WebView2's own browser identity (no user-agent override). On macOS, Gmail and WhatsApp are told they are talking to the Mac's real Safari (version read from `/Applications/Safari.app`) and Slack that it is Chrome: WebKit's default has no Safari part, which Gmail rejects. Each service has its own profile folder under
   `%APPDATA%\local.huburt.app\stores\`.
 
 ### macOS

@@ -2,27 +2,56 @@
 use regex::Regex;
 
 /// Slack blocks Safari/WebKit's own identity with "Please update your browser"; it accepts Chrome's.
-/// (macOS only: on Windows the web view is Edge-based, and its own identity is already accepted by both sites.)
+/// (macOS only: on Windows the web view is Edge-based, and its own identity is already accepted by every service.)
 #[cfg(target_os = "macos")]
 pub const CHROME_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
-/// WhatsApp Web refuses browsers it doesn't recognise; present as Safari.
+
+/// What a real Safari sends. WebKit's own default has no "Version/x Safari/605.1.15" part, and Gmail answers that with "This
+/// browser version is no longer supported", so Gmail and WhatsApp are told they are talking to Safari.
+#[cfg(any(target_os = "macos", test))]
+fn safari_ua_for(version: &str) -> String {
+    format!("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/{version} Safari/605.1.15")
+}
+
+/// A Safari version number ("27.2") from whatever was read from Safari's Info.plist, or None if it doesn't look like one.
+#[cfg(any(target_os = "macos", test))]
+fn clean_safari_version(raw: &str) -> Option<String> {
+    let v = raw.trim();
+    let ok = !v.is_empty() && v.len() <= 10 && v.chars().all(|c| c.is_ascii_digit() || c == '.') && v.chars().next().is_some_and(|c| c.is_ascii_digit());
+    ok.then(|| v.to_string())
+}
+
+/// The installed Safari's version, read once. Presenting the Mac's own current Safari keeps this correct through macOS
+/// updates, where a number written into the code would go stale. Falls back to a recent one if Safari can't be read.
 #[cfg(target_os = "macos")]
-pub const SAFARI_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+fn safari_ua() -> String {
+    static UA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    UA.get_or_init(|| {
+        let read = std::process::Command::new("/usr/bin/plutil")
+            .args(["-extract", "CFBundleShortVersionString", "raw", "-o", "-", "/Applications/Safari.app/Contents/Info.plist"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| clean_safari_version(&String::from_utf8_lossy(&o.stdout)));
+        safari_ua_for(&read.unwrap_or_else(|| "26.0".to_string()))
+    })
+    .clone()
+}
+
+#[cfg(target_os = "macos")]
+fn ua_safari() -> Option<String> { Some(safari_ua()) }
+#[cfg(not(target_os = "macos"))]
+fn ua_safari() -> Option<String> { None }
+#[cfg(target_os = "macos")]
+fn ua_chrome() -> Option<String> { Some(CHROME_UA.to_string()) }
+#[cfg(not(target_os = "macos"))]
+fn ua_chrome() -> Option<String> { None }
 
 /// Hosts that always stay inside Hub (single sign-on providers), on top of each service's own hosts.
 pub const SIGN_IN_HOSTS: &[&str] = &[
     "google.com", "gstatic.com", "microsoft.com", "microsoftonline.com", "live.com", "okta.com", "oktapreview.com",
     "apple.com", "github.com", "auth0.com", "onelogin.com", "duosecurity.com", "slack.com", "slack-edge.com",
 ];
-
-#[cfg(target_os = "macos")]
-const SLACK_UA: Option<&str> = Some(CHROME_UA);
-#[cfg(not(target_os = "macos"))]
-const SLACK_UA: Option<&str> = None;
-#[cfg(target_os = "macos")]
-const WHATSAPP_UA: Option<&str> = Some(SAFARI_UA);
-#[cfg(not(target_os = "macos"))]
-const WHATSAPP_UA: Option<&str> = None;
 
 pub struct SleepCycle {
     pub interval: u64,
@@ -38,7 +67,9 @@ pub struct Service {
     pub hosts: &'static [&'static str],
     /// Fixed, so each service keeps its own login across launches (macOS 14+ persistent data store).
     pub store: [u8; 16],
-    pub user_agent: Option<&'static str>,
+    /// What the page is told its browser is (None: the web view's own identity). A function, because the right Safari version
+    /// is read from the Mac when it is needed.
+    pub user_agent: fn() -> Option<String>,
     /// Page is only loaded while you look at it; a poller (or sleep cycle) keeps the badge fresh.
     pub lazy: bool,
     pub has_poller: bool,
@@ -110,7 +141,7 @@ pub static SERVICES: &[Service] = &[
         id: "slack", name: "Slack", icon: "slack",
         url: "https://app.slack.com/client",
         hosts: &["slack.com", "slack-edge.com"],
-        store: store(2), user_agent: SLACK_UA,
+        store: store(2), user_agent: ua_chrome,
         lazy: true, has_poller: true, poll_while_loaded: true, poll_interval: 30,
         unread_wording: "DMs/mentions",
         sleep_cycle: None, wake_ready_js: None, logged_out_js: None,
@@ -125,7 +156,7 @@ pub static SERVICES: &[Service] = &[
         id: "gmail", name: "Gmail", icon: "gmail",
         url: "https://mail.google.com/mail/u/0/",
         hosts: &["google.com", "gstatic.com", "googleusercontent.com"],
-        store: store(1), user_agent: None,
+        store: store(1), user_agent: ua_safari,
         lazy: true, has_poller: true, poll_while_loaded: true, poll_interval: 60,
         unread_wording: "unread emails",
         sleep_cycle: None, wake_ready_js: None, logged_out_js: None,
@@ -140,7 +171,7 @@ pub static SERVICES: &[Service] = &[
         id: "whatsapp", name: "WhatsApp", icon: "whatsapp",
         url: "https://web.whatsapp.com",
         hosts: &["whatsapp.com", "whatsapp.net"],
-        store: store(3), user_agent: WHATSAPP_UA,
+        store: store(3), user_agent: ua_safari,
         lazy: true, has_poller: false, poll_while_loaded: false, poll_interval: 60,
         unread_wording: "unread chats",
         sleep_cycle: Some(SleepCycle { interval: 300, awake_for: 45 }),
@@ -265,6 +296,32 @@ mod tests {
         assert!(gmail.stays_in_app("accounts.google.com", Some(("accounts.google.com", "/"))));
         let wa = service("whatsapp").unwrap();
         assert!(!wa.stays_in_app("github.com", Some(("web.whatsapp.com", "/"))));
+    }
+
+    #[test]
+    fn the_safari_identity_has_the_parts_google_looks_for() {
+        let ua = safari_ua_for("27.2");
+        assert!(ua.contains("AppleWebKit/605.1.15") && ua.contains("Version/27.2 Safari/605.1.15"), "{ua}");
+        assert!(ua.starts_with("Mozilla/5.0 (Macintosh;"));
+    }
+
+    #[test]
+    fn only_a_real_looking_version_is_used() {
+        assert_eq!(clean_safari_version("27.2\n").as_deref(), Some("27.2"));
+        assert_eq!(clean_safari_version("18").as_deref(), Some("18"));
+        for bad in ["", "  ", "Safari 27", "27.2; rm -rf", "x27.2", ".5", "27.2.1.4.5.6.7.8"] {
+            assert_eq!(clean_safari_version(bad), None, "{bad:?}");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn on_macos_every_service_presents_as_a_browser_it_knows() {
+        // WebKit's own default (no UA override) has no "Safari/" part, and Gmail refuses it as an unsupported browser.
+        for svc in SERVICES {
+            let ua = (svc.user_agent)().unwrap_or_else(|| panic!("{} has no user agent override on macOS", svc.id));
+            assert!(ua.contains("Safari/"), "{}: {ua}", svc.id);
+        }
     }
 
     #[test]
