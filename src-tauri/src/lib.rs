@@ -13,6 +13,7 @@ mod settings;
 mod slack;
 mod tray;
 mod types;
+mod ui_thread;
 mod webviews;
 
 use hub::Hub;
@@ -56,17 +57,14 @@ fn banner_event(hub: &Arc<Hub>, e: banner::Event) {
     match e {
         banner::Event::Action { action, info, text } => hub.handle_action(action, info, text),
         banner::Event::Open { info } => {
-            let h = hub.clone();
-            let _ = hub.app.run_on_main_thread(move || {
-                // greeting: open on whatever needs you most; otherwise on the service the banner was about
-                if info.contains_key("greeting") { webviews::show_window(&h, true); }
-                if let Some(id) = info.get("service") {
-                    h.select(id);
-                    webviews::show_window(&h, false);
-                    // Jump straight to the message or conversation the banner was about
-                    if let Some(u) = info.get("url") { h.navigate(id, u); }
-                }
-            });
+            // greeting: open on whatever needs you most; otherwise on the service the banner was about
+            if info.contains_key("greeting") { webviews::show_window(hub, true); }
+            if let Some(id) = info.get("service") {
+                hub.select(id);
+                webviews::show_window(hub, false);
+                // Jump straight to the message or conversation the banner was about
+                if let Some(u) = info.get("url") { hub.navigate(id, u); }
+            }
         }
     }
 }

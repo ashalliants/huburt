@@ -7,7 +7,7 @@ use crate::{
 };
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{atomic::Ordering, Arc},
 };
 use tauri::{
     webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder},
@@ -47,8 +47,18 @@ pub fn ensure_window(hub: &Arc<Hub>) -> tauri::Window {
     win
 }
 
+/// Everything below that touches a window or web view runs on the UI thread (see `ui_thread.rs`), never on the main thread:
+/// on Windows, creating them in a synchronous command or event handler deadlocks the whole app. The public functions only
+/// queue the work and return at once; the `_now` functions are what the UI thread runs.
+fn on_ui(hub: &Arc<Hub>, name: &'static str, job: impl FnOnce(&Arc<Hub>) + Send + 'static) {
+    let h = hub.clone();
+    hub.ui.post(name, move || job(&h));
+}
+
 /// Window open: Huburt shows in the Dock. Window hidden: it lives only in the menu bar.
-pub fn show_window(hub: &Arc<Hub>, pick_urgent: bool) {
+pub fn show_window(hub: &Arc<Hub>, pick_urgent: bool) { on_ui(hub, "show window", move |h| show_window_now(h, pick_urgent)); }
+
+fn show_window_now(hub: &Arc<Hub>, pick_urgent: bool) {
     let was_visible = hub.core.lock().unwrap().window_visible;
     if pick_urgent && !was_visible {
         hub.select_most_urgent();
@@ -62,7 +72,9 @@ pub fn show_window(hub: &Arc<Hub>, pick_urgent: bool) {
     layout(hub);
 }
 
-pub fn hide_window(hub: &Arc<Hub>) {
+pub fn hide_window(hub: &Arc<Hub>) { on_ui(hub, "hide window", hide_window_now); }
+
+fn hide_window_now(hub: &Arc<Hub>) {
     if let Some(w) = hub.app.get_window("main") {
         let _ = w.hide();
     }
@@ -77,8 +89,10 @@ pub fn hide_window(hub: &Arc<Hub>) {
 }
 
 pub fn toggle_window(hub: &Arc<Hub>) {
-    let (visible, focused) = { let c = hub.core.lock().unwrap(); (c.window_visible, c.window_focused) };
-    if visible && focused { hide_window(hub) } else { show_window(hub, true) }
+    on_ui(hub, "toggle window", |h| {
+        let (visible, focused) = { let c = h.core.lock().unwrap(); (c.window_visible, c.window_focused) };
+        if visible && focused { hide_window_now(h) } else { show_window_now(h, true) }
+    });
 }
 
 /// One of Hub's own pages (the sidebar, or the cover shown while a service isn't ready). Never overlaps a service's web
@@ -96,13 +110,21 @@ fn ensure_local(hub: &Arc<Hub>, win: &tauri::Window, label: &str) {
 
 fn ensure_ui(hub: &Arc<Hub>, win: &tauri::Window) { ensure_local(hub, win, "ui"); }
 
-static LAYOUT: Mutex<()> = Mutex::new(());
+/// Queues a layout. Many requests in a row (dragging the window edge, a burst of page events) collapse into one.
+pub fn layout(hub: &Arc<Hub>) {
+    if hub.layout_pending.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    on_ui(hub, "layout", |h| {
+        h.layout_pending.store(false, Ordering::SeqCst);
+        layout_now(h);
+    });
+}
 
 /// Puts every web view where it belongs. The sidebar takes the left strip. In the content area exactly one thing is
 /// shown: the selected service's page once it has drawn (until then it renders off-screen, so it isn't throttled and
 /// lays out properly), or otherwise the cover ("waking up", "can't reach", "turned off"). Other services are hidden.
-pub fn layout(hub: &Arc<Hub>) {
-    let _guard = LAYOUT.lock().unwrap_or_else(|e| e.into_inner());   // layouts are requested from several threads
+fn layout_now(hub: &Arc<Hub>) {
     let Some(win) = hub.app.get_window("main") else { return };
     let Ok(size) = win.inner_size() else { return };
     let scale = win.scale_factor().unwrap_or(1.0);
@@ -168,7 +190,9 @@ fn link_guard_js(def: &services::Service) -> String {
     )
 }
 
-pub fn create_service(hub: &Arc<Hub>, id: &'static str) {
+pub fn create_service(hub: &Arc<Hub>, id: &'static str) { on_ui(hub, "create service", move |h| create_service_now(h, id)); }
+
+fn create_service_now(hub: &Arc<Hub>, id: &'static str) {
     let Some(def) = services::service(id) else { return };
     let win = ensure_window(hub);
     let lbl = label(id);
@@ -244,31 +268,44 @@ fn unique_download_path(name: &str) -> PathBuf {
 }
 
 pub fn close_service(hub: &Arc<Hub>, id: &str) {
-    if let Some(wv) = hub.app.get_webview(&label(id)) {
-        let _ = wv.close();
-    }
+    let id = id.to_string();
+    on_ui(hub, "close service", move |h| {
+        if let Some(wv) = h.app.get_webview(&label(&id)) {
+            let _ = wv.close();
+        }
+    });
 }
 
 pub fn eval(hub: &Arc<Hub>, id: &str, js: &str) {
-    if let Some(wv) = hub.app.get_webview(&label(id)) {
-        let _ = wv.eval(js);
-    }
+    let (id, js) = (id.to_string(), js.to_string());
+    on_ui(hub, "run script", move |h| {
+        if let Some(wv) = h.app.get_webview(&label(&id)) {
+            let _ = wv.eval(&js);
+        }
+    });
 }
 
 pub fn reload(hub: &Arc<Hub>, id: &str) {
-    if let Some(wv) = hub.app.get_webview(&label(id)) {
-        let _ = wv.reload();
-    }
+    let id = id.to_string();
+    on_ui(hub, "reload", move |h| {
+        if let Some(wv) = h.app.get_webview(&label(&id)) {
+            let _ = wv.reload();
+        }
+    });
 }
 
 pub fn navigate(hub: &Arc<Hub>, id: &str, url: &str) {
-    if let (Some(wv), Ok(u)) = (hub.app.get_webview(&label(id)), url.parse::<tauri::Url>()) {
-        let _ = wv.navigate(u);
-    }
+    let (id, url) = (id.to_string(), url.to_string());
+    on_ui(hub, "navigate", move |h| {
+        if let (Some(wv), Ok(u)) = (h.app.get_webview(&label(&id)), url.parse::<tauri::Url>()) {
+            let _ = wv.navigate(u);
+        }
+    });
 }
 
-/// The service's saved cookies (the whole store: `cookies_for_url` only returns cookies set for that exact host and misses
-/// the domain-wide login cookies). Needs the page's web view, so only works while it's loaded.
+/// The service's saved cookies: the whole store, because `cookies_for_url` only returns cookies set for that exact host and
+/// misses the domain-wide login cookies. Needs the page's web view, so only works while it's loaded. Never call this on the
+/// main thread (on Windows that deadlocks); the callers are worker threads.
 pub fn cookies(hub: &Arc<Hub>, id: &str) -> Vec<Cookie> {
     let (Some(wv), Some(def)) = (hub.app.get_webview(&label(id)), services::service(id)) else { return vec![] };
     let host = def.url.parse::<tauri::Url>().ok().and_then(|u| u.host_str().map(String::from)).unwrap_or_default();

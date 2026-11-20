@@ -9,6 +9,7 @@ use crate::{
     services::{self, Service, SERVICES},
     settings::Settings,
     types::*,
+    ui_thread::UiThread,
     webviews,
 };
 use serde::Serialize;
@@ -17,6 +18,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::{AppHandle, Emitter};
 
 /// At most this many banners per check; more than that collapses into one "N new …" summary.
@@ -48,6 +50,11 @@ pub struct Svc {
     pub signed_out: bool,
     pub last_checked: Option<Instant>,
     pub poller: Option<Poll>,
+    /// The poller still needs cookies / a token from the page. Cached here, because a poller is locked for the whole of a
+    /// network request and the core must never wait for that.
+    pub needs_creds: bool,
+    /// What the poller reads out of the page (a fixed property of the poller, cached for the same reason).
+    pub harvest_js: Option<&'static str>,
     pub poll_inflight: bool,
     pub poller_healthy: bool,
     pub next_poll: Instant,
@@ -104,11 +111,27 @@ pub enum Action {
     State,
     /// The menu bar icon and hover summary need refreshing.
     Banner,
+    /// Change a poller (its options, or forget what it has seen) on a worker thread: a poller is locked for the whole of a
+    /// network request, so this must never happen while the core lock is held.
+    Poller { id: &'static str, option: Option<(&'static str, String)>, reset: bool },
 }
 
 pub struct Hub {
     pub app: AppHandle,
     pub core: Mutex<Core>,
+    /// All window and web view work runs here, never on the main thread (see `ui_thread.rs`).
+    pub ui: UiThread,
+    /// A layout is already queued (so a burst of requests collapses into one).
+    pub layout_pending: AtomicBool,
+    watchdog: Watchdog,
+}
+
+/// Notices when the main thread stops answering (a hang), and says so in the log together with what the UI thread was doing.
+struct Watchdog {
+    started: Instant,
+    ping_inflight: AtomicBool,
+    ping_sent_ms: AtomicU64,
+    stalled: AtomicBool,
 }
 
 #[derive(Serialize, Clone)]
@@ -156,6 +179,8 @@ impl Svc {
             quiet: 0,
             signed_out: false,
             last_checked: None,
+            needs_creds: poller.as_ref().map(|p| p.needs_credentials()).unwrap_or(false),
+            harvest_js: poller.as_ref().and_then(|p| p.harvest_js()),
             poller: poller.map(|p| Arc::new(Mutex::new(p))),
             poll_inflight: false,
             poller_healthy: false,
@@ -183,9 +208,7 @@ impl Svc {
         }
     }
     fn lazy(&self) -> bool { self.def.lazy && (self.poller.is_some() || self.def.sleep_cycle.is_some()) }
-    fn needs_credentials(&self) -> bool {
-        self.poller.as_ref().map(|p| p.lock().unwrap().needs_credentials()).unwrap_or(false)
-    }
+    fn needs_credentials(&self) -> bool { self.needs_creds }
     fn waking(&self) -> bool { self.loaded && !self.ready && self.error.is_none() }
 }
 
@@ -307,7 +330,7 @@ impl Core {
         if s.enabled == on { return; }
         s.enabled = on;
         if on {
-            if let Some(p) = &s.poller { p.lock().unwrap().reset(); }
+            if s.poller.is_some() { a.push(Action::Poller { id: def.id, option: None, reset: true }); }
             s.did_first_wake = false; s.primed_wake = false; s.next_poll = Instant::now(); s.next_wake = None;
             self.settings.disabled.retain(|d| d != def.id);
         } else {
@@ -315,7 +338,7 @@ impl Core {
             s.loaded = false; s.ready = false;
             s.idle_deadline = None; s.wake_session = false; s.cred_wake = false; s.unread = 0; s.quiet = 0;
             s.last_checked = None; s.error = None; s.signed_out = false; s.keeping_online = false;
-            if let Some(p) = &s.poller { p.lock().unwrap().reset(); }
+            if s.poller.is_some() { a.push(Action::Poller { id: def.id, option: None, reset: true }); }
             self.settings.disabled.push(def.id.to_string());
             if sel == def.id {
                 if let Some(next) = self.enabled_ids().first() { self.selected = next.to_string(); }
@@ -520,7 +543,13 @@ pub fn day_key() -> String { chrono::Local::now().format("%Y-%m-%d").to_string()
 
 impl Hub {
     pub fn new(app: AppHandle) -> Arc<Hub> {
-        Arc::new(Hub { app, core: Mutex::new(Core::new(Settings::load(), env_secs("HUB_IDLE_SECONDS", 300))) })
+        Arc::new(Hub {
+            app,
+            core: Mutex::new(Core::new(Settings::load(), env_secs("HUB_IDLE_SECONDS", 300))),
+            ui: UiThread::start(),
+            layout_pending: AtomicBool::new(false),
+            watchdog: Watchdog { started: Instant::now(), ping_inflight: AtomicBool::new(false), ping_sent_ms: AtomicU64::new(0), stalled: AtomicBool::new(false) },
+        })
     }
 
     /// Starts the scheduler thread.
@@ -537,7 +566,30 @@ impl Hub {
         });
     }
 
+    /// Asks the main thread to answer a tiny job every tick; if it hasn't for several seconds, the app is hung, and the log
+    /// says so (once), with what the UI thread was doing, so a freeze leaves evidence.
+    fn check_main_thread(self: &Arc<Self>) {
+        const STALL_AFTER_MS: u64 = 8000;
+        let now_ms = self.watchdog.started.elapsed().as_millis() as u64;
+        if !self.watchdog.ping_inflight.swap(true, Ordering::SeqCst) {
+            self.watchdog.ping_sent_ms.store(now_ms, Ordering::SeqCst);
+            let hub = self.clone();
+            let _ = self.app.run_on_main_thread(move || {
+                hub.watchdog.ping_inflight.store(false, Ordering::SeqCst);
+                if hub.watchdog.stalled.swap(false, Ordering::SeqCst) {
+                    crate::log("the main thread is answering again");
+                }
+            });
+        } else {
+            let waited = now_ms.saturating_sub(self.watchdog.ping_sent_ms.load(Ordering::SeqCst));
+            if waited > STALL_AFTER_MS && !self.watchdog.stalled.swap(true, Ordering::SeqCst) {
+                crate::log(&format!("the main thread has not answered for {}s. {}", waited / 1000, self.ui.describe()));
+            }
+        }
+    }
+
     pub fn tick(self: &Arc<Self>) {
+        self.check_main_thread();
         let mut acts = vec![];
         let greet = {
             let mut c = self.core.lock().unwrap();
@@ -565,6 +617,7 @@ impl Hub {
                 Action::Layout => webviews::layout(self),
                 Action::State => self.emit_state(),
                 Action::Banner => self.update_tray(),
+                Action::Poller { id, option, reset } => self.configure_poller(id, option, reset),
                 Action::Probe(id, kind, js) => webviews::eval(self, id, &services::probe_js(id, kind, &js)),
                 Action::Poll(id) => self.spawn_poll(id),
                 Action::Presence(id) => self.spawn_presence(id),
@@ -626,20 +679,21 @@ impl Hub {
                     poll.lock().unwrap().set_credentials(Credentials { cookies, page_data: None });
                 }
             }
-            let (res, signed_out) = {
+            let (res, signed_out, needs) = {
                 let mut p = poll.lock().unwrap();
                 let r = p.poll();
-                (r, p.signed_out())
+                (r, p.signed_out(), p.needs_credentials())
             };
-            hub.poll_done(id, res, signed_out);
+            hub.poll_done(id, res, signed_out, needs);
         });
     }
 
-    fn poll_done(self: &Arc<Self>, id: &'static str, result: Option<PollResult>, signed_out: bool) {
+    fn poll_done(self: &Arc<Self>, id: &'static str, result: Option<PollResult>, signed_out: bool, needs_creds: bool) {
         let mut notifications = vec![];
         self.with(|c, acts| {
             let Some(s) = c.svcs.get_mut(id) else { return };
             s.poll_inflight = false;
+            s.needs_creds = needs_creds;
             if !s.enabled { return; }
             c.set_signed_out(id, signed_out, acts);
             let Some(s) = c.svcs.get_mut(id) else { return };
@@ -668,6 +722,25 @@ impl Hub {
         }
     }
 
+    /// Hands a poller its credentials and records whether it still needs more. Worker threads only: it waits for the poller.
+    fn give_credentials(self: &Arc<Self>, id: &'static str, poll: Poll, creds: Credentials) {
+        let needs = {
+            let mut p = poll.lock().unwrap();
+            p.set_credentials(creds);
+            p.needs_credentials()
+        };
+        self.with(|c, _| { if let Some(s) = c.svcs.get_mut(id) { s.needs_creds = needs; } });
+    }
+
+    fn configure_poller(self: &Arc<Self>, id: &'static str, option: Option<(&'static str, String)>, reset: bool) {
+        let Some(poll) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone()) else { return };
+        std::thread::spawn(move || {
+            let mut p = poll.lock().unwrap();
+            if let Some((key, value)) = option { p.set_option(key, &value); }
+            if reset { p.reset(); }
+        });
+    }
+
     fn spawn_presence(self: &Arc<Self>, id: &'static str) {
         let Some(poll) = self.core.lock().unwrap().svcs.get(id).and_then(|s| s.poller.clone()) else { return };
         let hub = self.clone();
@@ -684,7 +757,7 @@ impl Hub {
         let (has_poller, js) = {
             let c = self.core.lock().unwrap();
             let Some(s) = c.svcs.get(id) else { return };
-            (s.poller.is_some(), s.poller.as_ref().and_then(|p| p.lock().unwrap().harvest_js()))
+            (s.poller.is_some(), s.harvest_js)
         };
         if !has_poller { return; }
         let hub = self.clone();
@@ -698,7 +771,7 @@ impl Hub {
                 s.poller.clone()
             });
             if creds_now {
-                if let Some(p) = poll { p.lock().unwrap().set_credentials(Credentials { cookies, page_data: None }); }
+                if let Some(p) = poll { hub.give_credentials(id, p, Credentials { cookies, page_data: None }); }
             } else if let Some(js) = js {
                 webviews::eval(&hub, id, &services::probe_js(id, "harvest", js));
             }
@@ -774,7 +847,11 @@ impl Hub {
                     let c = self.core.lock().unwrap();
                     match c.svcs.get(id) { Some(s) => (s.poller.clone(), s.cookies.clone()), None => return }
                 };
-                if let Some(p) = poll { p.lock().unwrap().set_credentials(Credentials { cookies, page_data }); }
+                // this runs on the main thread (a command), which must never wait for a poller that is busy on the network
+                if let Some(p) = poll {
+                    let hub = self.clone();
+                    std::thread::spawn(move || hub.give_credentials(id, p, Credentials { cookies, page_data }));
+                }
             }
             "test" => crate::log(&format!("{id} page bridge ok: {value}")),
             _ => {}
@@ -903,7 +980,7 @@ impl Hub {
             c.settings.gmail_source = source.to_string();
             c.settings.save();
             if let Some(s) = c.svcs.get_mut("gmail") {
-                if let Some(p) = &s.poller { let mut p = p.lock().unwrap(); p.set_option("source", source); p.reset(); }
+                if s.poller.is_some() { a.push(Action::Poller { id: "gmail", option: Some(("source", source.to_string())), reset: true }); }
                 s.next_poll = Instant::now();   // re-read the count straight away
             }
             crate::log(&format!("gmail count source: {source}"));
@@ -967,7 +1044,8 @@ impl Hub {
             }
             (c.tray_count(), c.summary_text())
         };
-        crate::tray::update(self, total, &summary);
+        let hub = self.clone();
+        self.ui.post("update tray", move || crate::tray::update(&hub, total, &summary));
     }
 
     // MARK: daily greeting
@@ -1218,6 +1296,50 @@ mod tests {
         assert_ne!(c.selected, "slack", "selection moves to a service that is still on");
         assert!(c.settings.disabled.contains(&"slack".to_string()));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+
+    /// A poller that does nothing, standing in for one that is busy.
+    struct IdlePoller;
+    impl Poller for IdlePoller {
+        fn poll(&mut self) -> Option<PollResult> { None }
+        fn needs_credentials(&self) -> bool { false }
+        fn signed_out(&self) -> bool { false }
+        fn set_credentials(&mut self, _: Credentials) {}
+    }
+
+    #[test]
+    fn a_poller_busy_on_the_network_never_blocks_the_core() {
+        // A poller is locked for the whole of a network request. Everything the app's main thread does goes through the core,
+        // so if the core ever waited for a poller, a slow request would freeze every click and menu.
+        let mut c = core();
+        let poll: Poll = Arc::new(Mutex::new(Box::new(IdlePoller)));
+        c.svcs.get_mut("slack").unwrap().poller = Some(poll.clone());
+        c.svcs.get_mut("slack").unwrap().needs_creds = false;
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _busy = poll.lock().unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_secs(4));
+        });
+        locked_rx.recv().unwrap();   // the poller is now locked, as during a slow request
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let slack = services::service("slack").unwrap();
+            let mut acts = vec![];
+            c.tick(Instant::now(), &mut acts);
+            c.set_enabled(slack, false, &mut acts);
+            c.set_enabled(slack, true, &mut acts);
+            let _ = c.view();
+            c.refresh_visibility(&mut acts);
+            done_tx.send(acts).unwrap();
+        });
+        let acts = done_rx.recv_timeout(Duration::from_secs(2)).expect("the core waited for a busy poller");
+        // changes to the poller are queued as actions for a worker thread to do, not done under the lock
+        assert!(acts.iter().any(|a| matches!(a, Action::Poller { id: "slack", reset: true, .. })));
+        holder.join().unwrap();
     }
 
     #[test]
