@@ -358,6 +358,13 @@ impl Core {
         acts.push(Action::State);   // the sidebar shows the "!" from this
     }
 
+    /// Run by the close job when it actually executes: should this page still be closed? Not if the service has been wanted loaded
+    /// again since the decision (a load queued ahead of the close would be left with no page), unless the close is forced
+    /// (replacing a page that failed to load, where a fresh one is created right after).
+    pub fn close_wanted(&self, id: &str, force: bool) -> bool {
+        force || !self.svcs.get(id).is_some_and(|s| s.loaded)
+    }
+
     /// Decides, and records, that a service's page is being unloaded. Unless `force`, a service you are looking at (or have
     /// opened since the unload was queued) is left alone, decided under the core lock together with the change itself.
     pub fn begin_unload(&mut self, id: &'static str, force: bool) -> bool {
@@ -755,7 +762,7 @@ impl Hub {
                 Action::LoadBackground(id) => self.load_background(id),
                 Action::Unload(id) => self.unload(id),
                 Action::UnloadNow(id) => self.unload_inner(id, true),
-                Action::Close(id) => webviews::close_service(self, id),
+                Action::Close(id) => webviews::close_service(self, id, false),
                 Action::Layout => webviews::layout(self),
                 Action::State => self.emit_state(),
                 Action::Banner => self.update_tray(),
@@ -790,7 +797,7 @@ impl Hub {
     fn unload_inner(self: &Arc<Self>, id: &'static str, force: bool) {
         let was = self.with(|c, _| c.begin_unload(id, force));
         if was {
-            webviews::close_service(self, id);
+            webviews::close_service(self, id, force);
             crate::log(&format!("{id} unloaded"));
             self.with(|_, a| a.push(Action::State));
         }
@@ -1450,6 +1457,21 @@ mod tests {
         c.svcs.get_mut("gmail").unwrap().loaded = true;
         c.selected = "gmail".into();
         assert!(c.begin_unload("gmail", true));
+    }
+
+    #[test]
+    fn a_failed_page_being_replaced_is_closed_even_though_a_load_follows() {
+        let mut c = core();
+        c.svcs.get_mut("gmail").unwrap().loaded = true;
+        // the reload of a page that failed: unload it (forced), then load again straight away
+        assert!(c.begin_unload("gmail", true));
+        assert!(c.begin_load("gmail", false));
+        assert!(c.close_wanted("gmail", true), "the failed page must really be closed so a fresh one is created");
+        // whereas an ordinary close is skipped when the service has been wanted loaded again
+        assert!(!c.close_wanted("gmail", false));
+        // and happens as normal for a service that stayed unloaded
+        c.svcs.get_mut("gmail").unwrap().loaded = false;
+        assert!(c.close_wanted("gmail", false));
     }
 
     #[test]

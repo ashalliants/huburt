@@ -284,13 +284,12 @@ fn unique_download_path(name: &str) -> PathBuf {
     dest
 }
 
-pub fn close_service(hub: &Arc<Hub>, id: &str) {
+/// Closes a service's page. Unless `force`, the close is skipped if the service has been wanted loaded again since the decision
+/// to close it (see `Core::close_wanted`); `force` is for replacing a page that failed to load, which must really go.
+pub fn close_service(hub: &Arc<Hub>, id: &str, force: bool) {
     let id = id.to_string();
     on_ui(hub, "close service", move |h| {
-        // The decision to unload was made earlier, and this job runs later. If the service has been wanted loaded again in
-        // between (you opened it, so a load was queued ahead of this close), the page must stay: closing it now would leave the
-        // service marked loaded with no page behind it.
-        if h.core.lock().unwrap().svcs.get(id.as_str()).is_some_and(|s| s.loaded) {
+        if !h.core.lock().unwrap().close_wanted(&id, force) {
             return;
         }
         if let Some(wv) = h.app.get_webview(&label(&id)) {
