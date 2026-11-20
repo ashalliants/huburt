@@ -335,6 +335,7 @@ impl Core {
             }));
         }
         acts.push(Action::Banner);
+        acts.push(Action::State);   // the sidebar shows the "!" from this
     }
 
     /// Turns a service on or off. Off means nothing is loaded and nothing is checked in the background; the login is kept.
@@ -491,19 +492,16 @@ impl Core {
                 acts.push(Action::Poll(id, s.poll_gen));
             }
         }
+        let mut gave_up = false;
         if s.cred_wake && now >= s.next_cred_check {
             s.next_cred_check = now + Duration::from_secs(2);
             s.cred_tries += 1;
             let needs = s.needs_credentials();
             if !needs || s.cred_tries > 30 {
                 s.cred_wake = false;
-                if needs {
-                    // the page never produced a login: remember that, so it isn't loaded again until you open it
-                    s.signed_out = true;
-                    Self::remember_signed_out(&mut self.settings, id, true);
-                    acts.push(Action::Save);
-                    acts.push(Action::State);
-                }
+                // the page never produced a login: that is a sign-out like any other (saved, logged, announced once, shown
+                // in the tray), applied below once this service's state is no longer borrowed
+                gave_up = needs;
                 if !visible && s.loaded && !s.wake_session { acts.push(Action::Unload(id)); }
             }
         }
@@ -512,8 +510,10 @@ impl Core {
         if let Some(c) = s.def.sleep_cycle.as_ref() {
             if !s.loaded && !s.wake_session && s.signed_out {
                 // Signed out (or the QR code is showing): waking the page would only load the sign-in screen, which is
-                // heavy for nothing. Stay asleep until you open it and sign in; the next wake is then a full interval away.
+                // heavy for nothing. Stay asleep until you open it and sign in; the next wake is then a full interval away
+                // (not the quick first look a fresh start does, which a restart would otherwise leave pending).
                 s.next_wake = None;
+                s.did_first_wake = true;
             } else if !s.loaded && !s.wake_session {
                 let interval = env_secs("HUB_WAKE_INTERVAL", c.interval);
                 let due = *s.next_wake.get_or_insert_with(|| now + if s.did_first_wake { interval } else { Duration::from_secs(5) });
@@ -564,13 +564,17 @@ impl Core {
                 }
             }
         }
+        if gave_up { self.set_signed_out(id, true, acts); }
     }
 
     fn tick_presence(&mut self, now: Instant, acts: &mut Vec<Action>) {
         let mode = self.settings.slack_online_mode.clone();
-        let on = mode == "always" || (mode == "work" && is_work_time());
+        let wanted = mode == "always" || (mode == "work" && is_work_time());
         let Some(s) = self.svcs.get_mut("slack") else { return };
         if !s.enabled { return; }
+        // Signed out: there is nothing to keep online, and loading the page for it would be exactly the background churn a
+        // signed-out service must not cause. (Opening Slack yourself still works.)
+        let on = wanted && !s.signed_out;
         if on {
             if !s.keeping_online { s.keeping_online = true; crate::log("slack staying online: on"); }
             s.idle_deadline = None;
@@ -1227,8 +1231,9 @@ mod tests {
 
     #[test]
     fn a_signed_out_whatsapp_never_wakes_and_resumes_once_you_sign_in() {
-        let mut c = core();
-        c.set_signed_out("whatsapp", true, &mut vec![]);
+        // as after a restart: it was saved as signed out, so this start never did its quick first look
+        let mut c = Core::new(Settings { signed_out: vec!["whatsapp".into()], ..Default::default() }, Duration::from_secs(300));
+        assert!(!c.svcs["whatsapp"].did_first_wake);
         let t0 = Instant::now();
         for minutes in [0u64, 1, 6, 30, 60, 600] {
             let mut acts = vec![];
@@ -1241,6 +1246,9 @@ mod tests {
         let mut acts = vec![];
         c.tick_service("whatsapp", later, &mut acts);
         assert!(!has_load(&acts, "whatsapp"), "not straight away");
+        let mut acts = vec![];
+        c.tick_service("whatsapp", later + Duration::from_secs(10), &mut acts);
+        assert!(!has_load(&acts, "whatsapp"), "and not after the 5 seconds of a fresh start's quick first look");
         let mut acts = vec![];
         c.tick_service("whatsapp", later + Duration::from_secs(6 * 60), &mut acts);
         assert!(has_load(&acts, "whatsapp"), "then it syncs on its normal cycle again");
@@ -1328,7 +1336,34 @@ mod tests {
         c.tick_service("gmail", Instant::now(), &mut acts);
         assert!(c.svcs["gmail"].signed_out);
         assert_eq!(c.settings.signed_out, vec!["gmail".to_string()]);
+        // it goes through the same transition as every other sign-out: saved, tray refreshed, state refreshed, announced once
         assert!(acts.iter().any(|a| matches!(a, Action::Save)));
+        assert!(acts.iter().any(|a| matches!(a, Action::Banner)));
+        assert!(acts.iter().any(|a| matches!(a, Action::State)));
+        assert_eq!(acts.iter().filter(|a| matches!(a, Action::Notify(s, _) if s.id == "gmail")).count(), 1);
+    }
+
+    #[test]
+    fn a_signed_out_slack_is_not_loaded_to_keep_it_online() {
+        // "Show as online" keeps the Slack page loaded; with nothing to be online in, it must not load the page behind your back
+        let mut c = core();
+        c.settings.slack_online_mode = "always".into();
+        c.svcs.get_mut("slack").unwrap().signed_out = true;
+        let mut acts = vec![];
+        c.tick_presence(Instant::now(), &mut acts);
+        assert!(!has_load(&acts, "slack") && !acts.iter().any(|a| matches!(a, Action::Presence(_))));
+        assert!(!c.svcs["slack"].keeping_online);
+
+        // signed in: it does what it always did
+        c.svcs.get_mut("slack").unwrap().signed_out = false;
+        let mut acts = vec![];
+        c.tick_presence(Instant::now(), &mut acts);
+        assert!(has_load(&acts, "slack") && c.svcs["slack"].keeping_online);
+
+        // and signing out while it is keeping you online stops that
+        c.svcs.get_mut("slack").unwrap().signed_out = true;
+        c.tick_presence(Instant::now(), &mut vec![]);
+        assert!(!c.svcs["slack"].keeping_online);
     }
 
     #[test]
@@ -1411,6 +1446,7 @@ mod tests {
         c.set_signed_out("gmail", true, &mut acts);
         c.set_signed_out("gmail", true, &mut acts);
         assert_eq!(acts.iter().filter(|a| matches!(a, Action::Notify(..))).count(), 1);
+        assert!(acts.iter().any(|a| matches!(a, Action::State)), "the sidebar must be told, to show the \"!\"");
     }
 
     #[test]
