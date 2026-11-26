@@ -222,6 +222,10 @@ fn create_service_now(hub: &Arc<Hub>, id: &'static str, background: bool) {
     if let Some(ua) = (def.user_agent)() {
         b = b.user_agent(&ua);
     }
+    // Tauri's own file-drop handler swallows files dragged in from Explorer / Finder (it reports "handled" on both Windows and
+    // macOS), so the page (Slack, Gmail, WhatsApp) never sees the drop and attaching by drag-and-drop silently does nothing.
+    // Turning it off hands drops to the page itself. (The Hubert UI page doesn't take file drops, so only service pages need it.)
+    b = b.disable_drag_drop_handler();
     b = b.initialization_script_for_all_frames(services::notification_shim_js(id));
     b = b.initialization_script(link_guard_js(def));
     #[cfg(not(target_os = "macos"))]
