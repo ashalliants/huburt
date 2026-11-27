@@ -220,3 +220,68 @@ mod tests {
         }
     }
 }
+
+// MARK: macOS keyboard handling in child web views
+
+/// Tauri puts each page in a child web view, and on macOS two things go wrong with the keyboard. Both are fixed here by
+/// adding or replacing a method on Tauri's own classes, because Tauri doesn't offer a hook for either:
+///
+/// - **A hidden page takes the keyboard.** A page that is only doing a background check (WhatsApp waking up, Gmail) runs its
+///   own script, which focuses a box on its page; WebKit then asks the window to make that page the keyboard's owner, and the
+///   text cursor vanishes from the page you are typing in (and the window is left with nothing focused once that page closes).
+///   The window now refuses to give the keyboard to a page that is hidden or parked off-screen (`webviews::OFFSCREEN_X`).
+/// - **An unhandled key becomes text.** A key the page doesn't handle (Right Arrow while a macOS inline suggestion is showing)
+///   falls through to the window's own view (tao), which types it into the page as the control character U+001D, shown as an
+///   empty square. That view now ignores keys. Menu shortcuts don't go through it, so they are unaffected.
+///
+/// Safe to call repeatedly; it patches once, as soon as the classes exist (they are created with the first web view).
+#[cfg(target_os = "macos")]
+pub fn patch_key_handling() {
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+    use objc2::{msg_send, sel};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    extern "C" {
+        fn class_addMethod(cls: *const AnyClass, name: Sel, imp: *const (), types: *const std::ffi::c_char) -> Bool;
+    }
+
+    static DONE: AtomicBool = AtomicBool::new(false);
+    static NSWINDOW_MAKE_FIRST_RESPONDER: AtomicUsize = AtomicUsize::new(0);
+    if DONE.load(Ordering::SeqCst) { return; }
+
+    extern "C-unwind" fn ignore_key(_: *mut AnyObject, _: Sel, _: *mut AnyObject) {}
+
+    extern "C-unwind" fn make_first_responder(this: *mut AnyObject, cmd: Sel, responder: *mut AnyObject) -> Bool {
+        if !responder.is_null() {
+            if let Some(page_class) = AnyClass::get(c"WKWebView") {
+                let is_page: bool = unsafe { msg_send![&*responder, isKindOfClass: page_class] };
+                if is_page {
+                    let hidden: bool = unsafe { msg_send![&*responder, isHiddenOrHasHiddenAncestor] };
+                    let frame: objc2_foundation::NSRect = unsafe { msg_send![&*responder, frame] };
+                    if hidden || frame.origin.x < -1000.0 { return Bool::NO; }
+                }
+            }
+        }
+        let imp = NSWINDOW_MAKE_FIRST_RESPONDER.load(Ordering::SeqCst);
+        if imp == 0 { return Bool::NO; }
+        let original: extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool = unsafe { std::mem::transmute(imp) };
+        original(this, cmd, responder)
+    }
+
+    let (Some(window), Some(ns_window), Some(view)) =
+        (AnyClass::get(c"TaoWindow"), AnyClass::get(c"NSWindow"), AnyClass::get(c"TaoView")) else { return };
+    let make_first = sel!(makeFirstResponder:);
+    let Some(original) = ns_window.instance_method(make_first) else { return };
+    NSWINDOW_MAKE_FIRST_RESPONDER.store(original.implementation() as usize, Ordering::SeqCst);
+    let guard = unsafe { class_addMethod(window, make_first, make_first_responder as *const (), c"B@:@".as_ptr()) }.as_bool();
+
+    let key_down = view.instance_method(sel!(keyDown:)).map(|m| unsafe {
+        m.set_implementation(std::mem::transmute::<*const (), objc2::runtime::Imp>(ignore_key as *const ()));
+    }).is_some();
+
+    DONE.store(guard && key_down, Ordering::SeqCst);
+    crate::log(&format!("macOS keyboard patches: hidden pages refused the keyboard={guard}, unhandled keys ignored={key_down}"));
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn patch_key_handling() {}

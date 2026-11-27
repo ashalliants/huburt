@@ -191,8 +191,10 @@ pub fn service(id: &str) -> Option<&'static Service> { SERVICES.iter().find(|s| 
 // MARK: injected JavaScript
 
 /// Darkens a light-only site when the system is in dark mode: invert the page, then flip images and video back.
-/// Follows the system setting live because it's a CSS media query. Sites with their own dark theme add a class to
-/// <body>; the filter then steps aside entirely (page AND images) so nothing is inverted with nothing to undo it.
+/// The page and the flip-back must use the identical filter (invert(1) hue-rotate(180deg) is its own inverse); a softer
+/// page invert such as 0.92 leaves images with a negative-looking cast. Follows the system setting live because it's a CSS
+/// media query. Sites with their own dark theme add a class to <body>; the filter then steps aside entirely (page AND
+/// images) so nothing is inverted with nothing to undo it.
 pub fn dark_filter_js(native_dark_class: Option<&str>) -> String {
     let target = native_dark_class.map(|c| format!("html:has(body:not(.{c}))")).unwrap_or_else(|| "html".into());
     let media = ["img", "picture", "video", "canvas", "svg image", "[style*=\\\"background-image\\\"]"]
@@ -200,7 +202,7 @@ pub fn dark_filter_js(native_dark_class: Option<&str>) -> String {
     format!(
         r#"(function () {{
   var css = '@media (prefers-color-scheme: dark) {{' +
-    '{target} {{ background: #fff !important; filter: invert(0.92) hue-rotate(180deg); }}' +
+    '{target} {{ background: #fff !important; filter: invert(1) hue-rotate(180deg); }}' +
     '{media} {{ filter: invert(1) hue-rotate(180deg); }}' +
     '}}';
   function add() {{
@@ -346,5 +348,9 @@ mod tests {
         assert!(js.contains("html:has(body:not(.dark)) img"));
         assert!(!js.contains("'img, picture"));
         assert!(dark_filter_js(None).contains("html img"));
+        // Page and images must share one filter, or images come out looking like negatives.
+        let page = "filter: invert(1) hue-rotate(180deg); }";
+        assert!(js.contains(page) && !js.contains("invert(0."));
+        assert_eq!(js.matches("invert(1) hue-rotate(180deg)").count(), 2);
     }
 }
